@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn saves_and_loads_with_owner_only_permissions() {
-        let path = std::env::temp_dir().join(format!("socratik-test-{}.json", std::process::id()));
+        let path = std::env::temp_dir().join(format!("socratui-test-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let mut provider = Provider::new(Kind::Local, "");
         provider.base_url = "http://localhost:9999/v1".into();

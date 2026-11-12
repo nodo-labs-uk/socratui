@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Records the README's demos as animated SVGs, with nothing but the
-standard library, tmux and a debug build of socratik.
+standard library, tmux and a debug build of socratui.
 
-Each scene runs socratik in a private tmux server with its own data folder.
+Each scene runs socratui in a private tmux server with its own data folder.
 A small server in this script stands in for the Claude API: it answers each
 request with the next reply in the scene's script, streamed the way the API
 streams. Keys go in with `send-keys`; the pane is read with `capture-pane -e`
@@ -30,7 +30,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 OUT = ROOT / "docs" / "media"
-BIN = ROOT / "target" / "debug" / "socratik"
+BIN = ROOT / "target" / "debug" / "socratui"
 COLS, ROWS = 120, 30
 DAY = 86_400
 
@@ -187,7 +187,7 @@ class Seed:
         self.db.commit()
 
 
-# ---- a private tmux server running socratik ---------------------------------
+# ---- a private tmux server running socratui ---------------------------------
 
 WORLDS = []
 
@@ -199,31 +199,31 @@ class World:
         self.base = Path(self.tmp.name).resolve()
         os.chmod(self.base, 0o700)
         # The app's own default folder, under a throwaway home.
-        self.data = self.base / ".local" / "share" / "socratik"
+        self.data = self.base / ".local" / "share" / "socratui"
         self.data.mkdir(parents=True)
         if configured:
             (self.data / "config.json").write_text(json.dumps({
                 "provider": "anthropic", "base_url": f"http://127.0.0.1:{MODEL.port}/v1",
                 "key": "demo", "model": "claude-fable-5-2"}))
         if seed:
-            seed(Seed(self.data / "socratik.db"))
-        self.socket = f"socratikdemo-{os.getpid()}"
+            seed(Seed(self.data / "socratui.db"))
+        self.socket = f"socratuidemo-{os.getpid()}"
         conf = self.base / "tmux.conf"
         conf.write_text("set -g status off\nset -g escape-time 10\n"
                         "set -g default-terminal tmux-256color\n")
         # `env` runs after the shell's startup files, so a key they export
         # cannot reach the app.
         cmd = ["env", "-u", "ANTHROPIC_API_KEY", "-u", "OPENAI_API_KEY", "-u", "HF_TOKEN",
-               "-u", "SOCRATIK_MODEL", "-u", "SOCRATIK_DATA_DIR", "-u", "XDG_DATA_HOME",
+               "-u", "SOCRATUI_MODEL", "-u", "SOCRATUI_DATA_DIR", "-u", "XDG_DATA_HOME",
                f"HOME={self.base}", str(BIN)]
         self.tmux("-f", str(conf), "new-session", "-d", "-s", "demo", "-x", str(COLS), "-y", str(ROWS),
                   " ".join(cmd))
         self.pane = self.tmux("display-message", "-p", "-t", "demo", "#{pane_id}").strip()
         self.caption = None
-        self.see("Socratik")
+        self.see("Socratui")
 
     def db(self):
-        return sqlite3.connect(self.data / "socratik.db")
+        return sqlite3.connect(self.data / "socratui.db")
 
     def tmux(self, *args):
         env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
@@ -524,7 +524,7 @@ def scene_hero():
     ]
     w = World()
     with Recorder(w) as rec:
-        w.caption = "Socratik is a tutor in your terminal. Press n and say what you want to learn."
+        w.caption = "Socratui is a tutor in your terminal. Press n and say what you want to learn."
         time.sleep(3.5)
         w.keys("n", gap=0.8)
         w.type("Big-O notation", delay=0.06)

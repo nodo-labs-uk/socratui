@@ -1,9 +1,9 @@
 [package]
-name = "socratik"
-version = "0.1.1"
+name = "socratui"
+version = "0.2.0"
 description = "A Socratic tutor in your terminal, with a skill map, spaced review and flashcards"
 license = "MIT"
-repository = "https://github.com/nodo-labs-uk/socratik"
+repository = "https://github.com/nodo-labs-uk/socratui"
 edition = "2024"
 
 [dependencies]

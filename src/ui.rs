@@ -176,7 +176,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let gap = (header.width as usize).saturating_sub(9 + due.width());
     f.render_widget(
         Line::from(vec![
-            Span::styled(" Socratik", bold().fg(ACCENT)),
+            Span::styled(" Socratui", bold().fg(ACCENT)),
             Span::raw(" ".repeat(gap)),
             Span::styled(due, dim()),
         ]),

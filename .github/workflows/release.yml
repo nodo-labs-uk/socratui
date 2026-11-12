@@ -1,4 +1,4 @@
-# Builds socratik when a version tag is pushed (git tag v0.1.0 && git push --tags)
+# Builds socratui when a version tag is pushed (git tag v0.1.0 && git push --tags)
 # and attaches the binary to a GitHub release.
 name: release
 
@@ -21,14 +21,14 @@ jobs:
       - name: Package
         run: |
           # No version in the name, so the latest release always has the same file.
-          name="socratik-x86_64-linux"
+          name="socratui-x86_64-linux"
           mkdir "$name"
-          cp target/release/socratik README.md LICENSE "$name/"
+          cp target/release/socratui README.md LICENSE "$name/"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
       - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" socratik-*.tar.gz socratik-*.tar.gz.sha256 \
-            --title "socratik $GITHUB_REF_NAME" --generate-notes
+          gh release create "$GITHUB_REF_NAME" socratui-*.tar.gz socratui-*.tar.gz.sha256 \
+            --title "socratui $GITHUB_REF_NAME" --generate-notes
