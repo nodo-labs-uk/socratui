@@ -98,37 +98,57 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 fn key_hints(app: &App) -> Line<'static> {
     match &app.screen {
         Screen::Home => hints(&[
-            ("n", "new topic"),
             ("Enter", "learn"),
+            ("n", "new topic"),
             ("r", "review concepts"),
             ("f", "flashcards"),
-            ("h", "history"),
+            ("H", "history"),
+            ("m", "model"),
             ("e", "export to Anki"),
-            ("d", "delete"),
             ("s", "settings"),
+            ("dd", "delete"),
             ("q", "quit"),
         ]),
-        Screen::Chat(chat) if chat.read_only => {
-            hints(&[("↑↓ PgUp PgDn", "scroll"), ("Esc", "back")])
-        }
-        Screen::Chat(_) => hints(&[
-            ("Enter", "send"),
-            ("Alt+Enter", "new line"),
-            ("Ctrl+F", "make flashcards"),
-            ("PgUp PgDn", "scroll"),
-            ("Ctrl+R", "retry"),
-            ("Esc", "back"),
+        Screen::Chat(chat) if chat.read_only => hints(&[
+            ("j k", "scroll"),
+            ("Ctrl+D Ctrl+U", "half page"),
+            ("gg G", "top, end"),
+            ("q", "back"),
         ]),
+        Screen::Chat(chat) => {
+            let mut keys = if chat.insert {
+                vec![
+                    ("Enter", "send"),
+                    ("Alt+Enter", "new line"),
+                    ("Ctrl+F", "make flashcards"),
+                    ("Esc", "normal mode"),
+                ]
+            } else {
+                vec![
+                    ("i", "type"),
+                    ("j k", "scroll"),
+                    ("Ctrl+D Ctrl+U", "half page"),
+                    ("gg G", "top, end"),
+                    ("Ctrl+F", "make flashcards"),
+                    ("m", "model"),
+                    ("q", "back"),
+                ]
+            };
+            if chat.error.is_some() {
+                keys.insert(0, ("Ctrl+R", "retry"));
+            }
+            hints(&keys)
+        }
         Screen::Cards(_) => hints(&[
             ("Space", "show answer"),
             ("1", "again"),
             ("2", "hard"),
             ("3", "good"),
             ("4", "easy"),
-            ("d", "delete card"),
-            ("Esc", "back"),
+            ("dd", "delete card"),
+            ("q", "back"),
         ]),
-        Screen::History => hints(&[("↑↓", "select"), ("Enter", "open"), ("Esc", "back")]),
+        Screen::History => hints(&[("j k", "move"), ("Enter", "open"), ("q", "back")]),
     }
 }
 
@@ -430,6 +450,7 @@ fn draw_chat(f: &mut Frame, area: Rect, chat: &mut Chat) {
 
     let lines = transcript(chat, log.width.saturating_sub(2) as usize);
     let view = log.height.saturating_sub(2) as usize;
+    chat.view = view;
     let max_scroll = lines.len().saturating_sub(view);
     chat.scroll = chat.scroll.min(max_scroll);
     let top = max_scroll - chat.scroll;
@@ -452,21 +473,28 @@ fn draw_chat(f: &mut Frame, area: Rect, chat: &mut Chat) {
     if chat.read_only {
         return;
     }
+    let text_style = if chat.insert { Style::new() } else { dim() };
     let shown: Vec<Line> = rows
         .into_iter()
         .skip(first_row)
         .take(MAX_INPUT_ROWS)
-        .map(Line::from)
+        .map(|r| Line::styled(r, text_style))
         .collect();
     let title = if chat.busy {
         " Your answer (the tutor is replying) "
     } else {
         " Your answer "
     };
-    f.render_widget(
-        Paragraph::new(shown).block(Block::bordered().title(title)),
-        input,
-    );
+    let mut block = Block::bordered().title(title);
+    if !chat.insert {
+        block = block
+            .border_style(dim())
+            .title(Line::styled(" NORMAL · i to type ", bold().fg(Color::Yellow)).right_aligned());
+    }
+    f.render_widget(Paragraph::new(shown).block(block), input);
+    if !chat.insert {
+        return;
+    }
     f.set_cursor_position((
         input.x + 1 + cursor.0 as u16,
         input.y + 1 + (cursor.1 - first_row) as u16,
@@ -586,9 +614,16 @@ fn history(f: &mut Frame, area: Rect, app: &App) {
 
 // ---- modals ----
 
+const PICKER_ROWS: usize = 8;
+
 fn draw_modal(f: &mut Frame, modal: &Modal) {
     let screen = f.area();
-    let (width, height) = (screen.width.min(64), 8.min(screen.height));
+    // The picker keeps one size, whatever the filter leaves in its list.
+    let height = match modal {
+        Modal::Model(_) => PICKER_ROWS as u16 + 7,
+        _ => 8,
+    };
+    let (width, height) = (screen.width.min(64), height.min(screen.height));
     let area = Rect::new(
         screen.x + (screen.width - width) / 2,
         screen.y + (screen.height - height) / 2,
@@ -599,6 +634,69 @@ fn draw_modal(f: &mut Frame, modal: &Modal) {
     let inner = width.saturating_sub(4) as usize;
 
     match modal {
+        Modal::Model(picker) => {
+            let shown = picker.shown();
+            let typed = picker.input.text();
+            // Keep the highlighted row on screen.
+            let first = (picker.selected + 1).saturating_sub(PICKER_ROWS);
+            let fetching = if picker.loading {
+                " · fetching the list"
+            } else {
+                ""
+            };
+            let mut lines = vec![
+                Line::styled(format!("Type to filter{fetching}"), dim()),
+                Line::from(vec![
+                    Span::styled("› ", bold().fg(ACCENT)),
+                    Span::raw(typed.clone()),
+                ]),
+                Line::default(),
+            ];
+            for (i, model) in shown.iter().enumerate().skip(first).take(PICKER_ROWS) {
+                // Padded to the full width, so the highlight spans the row.
+                let tag = if *model == picker.current {
+                    "current"
+                } else {
+                    ""
+                };
+                let line = Line::from(vec![
+                    Span::raw(fit(model, inner.saturating_sub(8))),
+                    Span::styled(format!("{tag:>8}"), dim()),
+                ]);
+                lines.push(if i == picker.selected {
+                    line.style(selected())
+                } else {
+                    line
+                });
+            }
+            if shown.is_empty() {
+                let message = match typed.trim() {
+                    "" => "No models to show. Type a name.".to_string(),
+                    t => format!("No match. Enter uses \"{t}\" as typed."),
+                };
+                lines.push(Line::styled(message, dim()));
+            }
+            while lines.len() < PICKER_ROWS + 3 {
+                lines.push(Line::default());
+            }
+            lines.push(Line::styled(picker.note.clone().unwrap_or_default(), dim()));
+            lines.push(hints(&[
+                ("Enter", "use"),
+                ("Ctrl+N Ctrl+P", "move"),
+                ("Esc", "close"),
+            ]));
+            let title = format!(" Model · {} ", picker.provider);
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::bordered()
+                        .title(title)
+                        .padding(ratatui::widgets::Padding::horizontal(1)),
+                ),
+                area,
+            );
+            let (_, cursor) = picker.input.layout(inner);
+            f.set_cursor_position((area.x + 4 + cursor.0 as u16, area.y + 2));
+        }
         Modal::NewTopic { input, target } => {
             let (rows, cursor) = input.layout(inner);
             let row = cursor.1;

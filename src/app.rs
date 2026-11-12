@@ -46,6 +46,11 @@ pub struct Chat {
     pub tokens: (u64, u64),
     /// A past session opened from the history screen.
     pub read_only: bool,
+    /// Typing into the answer box (vim's insert mode); otherwise keys move
+    /// around the transcript (normal mode).
+    pub insert: bool,
+    /// Rows of transcript on screen, set while drawing, for half-page moves.
+    pub view: usize,
     system: String,
     messages: Vec<Value>,
     turn_id: u64,
@@ -79,6 +84,61 @@ pub enum Modal {
         action: ConfirmAction,
     },
     Setup(Setup),
+    Model(ModelPicker),
+}
+
+/// Picks the model from the provider's list, filtered by what is typed.
+pub struct ModelPicker {
+    /// The provider's name, for the title.
+    pub provider: &'static str,
+    pub input: Input,
+    pub models: Vec<String>,
+    pub current: String,
+    /// Index into `shown()`.
+    pub selected: usize,
+    pub loading: bool,
+    pub note: Option<String>,
+    id: u64,
+}
+
+impl ModelPicker {
+    pub fn shown(&self) -> Vec<&str> {
+        let filter = self.input.text().trim().to_lowercase();
+        self.models
+            .iter()
+            .map(String::as_str)
+            .filter(|m| m.to_lowercase().contains(&filter))
+            .collect()
+    }
+
+    /// The highlighted model, or what was typed when nothing matches it.
+    fn choice(&self) -> Option<String> {
+        match self.shown().get(self.selected) {
+            Some(m) => Some(m.to_string()),
+            None => Some(self.input.text().trim().to_string()).filter(|t| !t.is_empty()),
+        }
+    }
+
+    fn loaded(&mut self, result: Result<Vec<String>, String>) {
+        self.loading = false;
+        match result {
+            Ok(models) if !models.is_empty() => {
+                self.models = models;
+                if !self.models.contains(&self.current) {
+                    self.models.insert(0, self.current.clone());
+                }
+            }
+            Ok(_) => self.note = Some("The provider listed no models. Type a name instead.".into()),
+            Err(e) => self.note = Some(format!("Could not fetch the list ({e}).")),
+        }
+        if self.input.is_blank() {
+            self.selected = self
+                .models
+                .iter()
+                .position(|m| *m == self.current)
+                .unwrap_or(0);
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -135,7 +195,11 @@ pub struct App {
     pub history_selected: usize,
     pub status: String,
     pub quit: bool,
+    /// The first key of a two-key command such as `gg` or `dd`.
+    pending: Option<char>,
     data_dir: PathBuf,
+    models_tx: Sender<(u64, Result<Vec<String>, String>)>,
+    models_rx: Receiver<(u64, Result<Vec<String>, String>)>,
     tx: Sender<(u64, StreamEvent)>,
     rx: Receiver<(u64, StreamEvent)>,
     next_turn: u64,
@@ -189,6 +253,7 @@ fn truncate(text: &str, max: usize) -> String {
 impl App {
     pub fn new(db: Db, provider: Option<Provider>, data_dir: PathBuf) -> Result<Self> {
         let (tx, rx) = mpsc::channel();
+        let (models_tx, models_rx) = mpsc::channel();
         let mut app = Self {
             db,
             provider,
@@ -200,7 +265,10 @@ impl App {
             history_selected: 0,
             status: String::new(),
             quit: false,
+            pending: None,
             data_dir,
+            models_tx,
+            models_rx,
             tx,
             rx,
             next_turn: 0,
@@ -266,7 +334,14 @@ impl App {
                     (Some(Modal::Setup(setup)), _) if setup.step != SetupStep::Provider => {
                         setup.input.insert_str(text.trim())
                     }
-                    (None, Screen::Chat(chat)) if !chat.read_only => chat.input.insert_str(&text),
+                    (Some(Modal::Model(picker)), _) => {
+                        picker.input.insert_str(text.trim());
+                        picker.selected = 0;
+                    }
+                    (None, Screen::Chat(chat)) if !chat.read_only => {
+                        chat.insert = true;
+                        chat.input.insert_str(&text)
+                    }
                     _ => {}
                 }
                 Ok(())
@@ -317,11 +392,11 @@ impl App {
 
         match (setup.step, key.code) {
             (SetupStep::Provider, KeyCode::Esc) => self.modal = None,
-            (SetupStep::Provider, KeyCode::Left) => {
+            (SetupStep::Provider, KeyCode::Left | KeyCode::Char('h')) => {
                 let i = Kind::ALL.iter().position(|k| *k == setup.kind).unwrap_or(0);
                 setup.kind = Kind::ALL[i.saturating_sub(1)];
             }
-            (SetupStep::Provider, KeyCode::Right | KeyCode::Tab) => {
+            (SetupStep::Provider, KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab) => {
                 let i = Kind::ALL.iter().position(|k| *k == setup.kind).unwrap_or(0);
                 setup.kind = Kind::ALL[(i + 1).min(Kind::ALL.len() - 1)];
             }
@@ -367,12 +442,85 @@ impl App {
         Ok(())
     }
 
+    fn open_model_picker(&mut self) {
+        let Some(provider) = self.provider.clone() else {
+            self.open_setup();
+            return;
+        };
+        let mut models: Vec<String> = provider
+            .kind
+            .presets()
+            .iter()
+            .map(|m| m.to_string())
+            .collect();
+        if !models.contains(&provider.model) {
+            models.insert(0, provider.model.clone());
+        }
+        self.next_turn += 1;
+        let id = self.next_turn;
+        let tx = self.models_tx.clone();
+        let fetch = provider.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send((id, api::list_models(&fetch)));
+        });
+        self.modal = Some(Modal::Model(ModelPicker {
+            provider: provider.kind.label(),
+            input: Input::default(),
+            selected: models
+                .iter()
+                .position(|m| *m == provider.model)
+                .unwrap_or(0),
+            models,
+            current: provider.model,
+            loading: true,
+            note: None,
+            id,
+        }));
+    }
+
+    fn model_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(Modal::Model(picker)) = &mut self.modal else {
+            return Ok(());
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let last = picker.shown().len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc => self.modal = None,
+            KeyCode::Down => picker.selected = (picker.selected + 1).min(last),
+            KeyCode::Char('n') if ctrl => picker.selected = (picker.selected + 1).min(last),
+            KeyCode::Up => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Char('p') if ctrl => picker.selected = picker.selected.saturating_sub(1),
+            KeyCode::Enter => {
+                if let (Some(model), Some(provider)) = (picker.choice(), &mut self.provider) {
+                    provider.model = model;
+                    provider.save(&self.data_dir.join(CONFIG_FILE))?;
+                    self.status = match &self.screen {
+                        Screen::Chat(chat) if !chat.read_only => {
+                            format!("The tutor uses {} from the next reply.", provider.model)
+                        }
+                        _ => format!("The tutor now uses {}.", provider.model),
+                    };
+                    self.modal = None;
+                }
+            }
+            _ => {
+                let before = picker.input.text();
+                edit_key(&mut picker.input, key);
+                if picker.input.text() != before {
+                    picker.selected = 0;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn modal_key(&mut self, key: KeyEvent) -> Result<()> {
         let Some(modal) = &mut self.modal else {
             return Ok(());
         };
         match modal {
             Modal::Setup(_) => return self.setup_key(key),
+            Modal::Model(_) => return self.model_key(key),
             Modal::NewTopic { input, target } => match key.code {
                 KeyCode::Esc => self.modal = None,
                 KeyCode::Tab => *target = if *target == 4 { 5 } else { 4 },
@@ -410,23 +558,26 @@ impl App {
 
     fn home_key(&mut self, key: KeyEvent) -> Result<()> {
         self.status.clear();
+        let pending = self.pending.take();
         let topic = self
             .topics
             .get(self.selected)
             .map(|t| (t.topic.id, t.topic.title.clone()));
+        let last = self.topics.len().saturating_sub(1);
         match key.code {
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.selected = (self.selected + 1).min(self.topics.len().saturating_sub(1))
-            }
+            KeyCode::Down | KeyCode::Char('j') => self.selected = (self.selected + 1).min(last),
             KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
+            KeyCode::Char('g') if pending == Some('g') => self.selected = 0,
+            KeyCode::Char('g') => self.pending = Some('g'),
+            KeyCode::Char('G') => self.selected = last,
             KeyCode::Char('n') => {
                 self.modal = Some(Modal::NewTopic {
                     input: Input::default(),
                     target: 4,
                 })
             }
-            KeyCode::Enter => {
+            KeyCode::Enter | KeyCode::Char('l') => {
                 if let Some((id, _)) = topic {
                     self.start_chat(id, Mode::Learn)?;
                 }
@@ -452,20 +603,25 @@ impl App {
                     });
                 }
             }
-            KeyCode::Char('h') => {
+            KeyCode::Char('H') => {
                 self.history = self.db.sessions()?;
                 self.history_selected = 0;
                 self.screen = Screen::History;
             }
             KeyCode::Char('e') => self.export()?,
             KeyCode::Char('s') => self.open_setup(),
-            KeyCode::Char('d') => {
+            KeyCode::Char('m') => self.open_model_picker(),
+            KeyCode::Char('d') if pending == Some('d') => {
                 if let Some((id, title)) = topic {
                     self.modal = Some(Modal::Confirm {
                         message: format!("Delete \"{title}\" with its sessions and flashcards?"),
                         action: ConfirmAction::DeleteTopic(id),
                     });
                 }
+            }
+            KeyCode::Char('d') if topic.is_some() => {
+                self.pending = Some('d');
+                self.status = "Press d again to delete this topic.".into();
             }
             _ => {}
         }
@@ -494,16 +650,21 @@ impl App {
     }
 
     fn history_key(&mut self, key: KeyEvent) -> Result<()> {
+        let pending = self.pending.take();
+        let last = self.history.len().saturating_sub(1);
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => self.screen = Screen::Home,
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') => self.screen = Screen::Home,
             KeyCode::Down | KeyCode::Char('j') => {
-                self.history_selected =
-                    (self.history_selected + 1).min(self.history.len().saturating_sub(1))
+                self.history_selected = (self.history_selected + 1).min(last)
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 self.history_selected = self.history_selected.saturating_sub(1)
             }
-            KeyCode::Enter => {
+            KeyCode::Char('g') if pending == Some('g') => self.history_selected = 0,
+            KeyCode::Char('g') => self.pending = Some('g'),
+            KeyCode::Char('G') => self.history_selected = last,
+            KeyCode::Char('m') => self.open_model_picker(),
+            KeyCode::Enter | KeyCode::Char('l') => {
                 if let Some(row) = self.history.get(self.history_selected) {
                     let items = self
                         .db
@@ -529,6 +690,8 @@ impl App {
                         scroll: usize::MAX,
                         tokens: (row.input_tokens as u64, row.output_tokens as u64),
                         read_only: true,
+                        insert: false,
+                        view: 0,
                         system: String::new(),
                         messages: Vec::new(),
                         turn_id: 0,
@@ -541,6 +704,7 @@ impl App {
     }
 
     fn cards_key(&mut self, key: KeyEvent) -> Result<()> {
+        let pending = self.pending.take();
         let Screen::Cards(review) = &mut self.screen else {
             return Ok(());
         };
@@ -552,12 +716,20 @@ impl App {
             _ => None,
         };
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') => {
                 self.screen = Screen::Home;
                 self.refresh_home()?;
             }
             KeyCode::Char(' ') | KeyCode::Enter => review.revealed = true,
+            KeyCode::Char('m') => self.open_model_picker(),
+            KeyCode::Char('d') if pending != Some('d') => {
+                if !review.queue.is_empty() {
+                    self.pending = Some('d');
+                    self.status = "Press d again to delete this card.".into();
+                }
+            }
             KeyCode::Char('d') => {
+                self.status.clear();
                 if let Some(card) = review.queue.front() {
                     self.modal = Some(Modal::Confirm {
                         message: "Delete this flashcard?".into(),
@@ -645,6 +817,8 @@ impl App {
             scroll: 0,
             tokens: (0, 0),
             read_only: false,
+            insert: true,
+            view: 0,
             system,
             messages: vec![json!({"role": "user", "content": content})],
             turn_id: 0,
@@ -721,48 +895,78 @@ impl App {
     }
 
     fn chat_key(&mut self, key: KeyEvent) -> Result<()> {
+        let pending = self.pending.take();
         let Screen::Chat(chat) = &mut self.screen else {
             return Ok(());
         };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let page = chat.view.max(2) - 1;
+        let half = (chat.view / 2).max(1);
+
+        // Keys that work in both modes.
         match key.code {
-            KeyCode::Esc => return self.leave_chat(),
-            KeyCode::PageUp => chat.scroll = chat.scroll.saturating_add(10),
-            KeyCode::PageDown => chat.scroll = chat.scroll.saturating_sub(10),
+            KeyCode::PageUp => chat.scroll = chat.scroll.saturating_add(page),
+            KeyCode::PageDown => chat.scroll = chat.scroll.saturating_sub(page),
             KeyCode::Up => chat.scroll = chat.scroll.saturating_add(1),
             KeyCode::Down => chat.scroll = chat.scroll.saturating_sub(1),
-            _ if chat.read_only => {
-                if key.code == KeyCode::Char('q') {
-                    return self.leave_chat();
-                }
-            }
             KeyCode::Char('r') if ctrl => {
-                if chat.error.is_some() {
+                if chat.error.is_some() && !chat.read_only {
                     self.request();
                 }
             }
             KeyCode::Char('f') if ctrl => {
-                if !chat.busy {
+                if !chat.busy && !chat.read_only {
                     return self.say("Make flashcards for what we have covered so far.");
                 }
             }
-            KeyCode::Char('j') if ctrl => chat.input.insert('\n'),
-            KeyCode::Enter if alt => chat.input.insert('\n'),
-            KeyCode::Enter => {
-                if !chat.busy && !chat.input.is_blank() {
-                    let text = chat.input.text().trim().to_string();
-                    chat.input.clear();
-                    return self.say(&text);
+            _ if chat.insert && !chat.read_only => match key.code {
+                KeyCode::Esc => chat.insert = false,
+                KeyCode::Char('j') if ctrl => chat.input.insert('\n'),
+                KeyCode::Enter if alt => chat.input.insert('\n'),
+                KeyCode::Enter => {
+                    if !chat.busy && !chat.input.is_blank() {
+                        let text = chat.input.text().trim().to_string();
+                        chat.input.clear();
+                        return self.say(&text);
+                    }
                 }
+                _ => edit_key(&mut chat.input, key),
+            },
+            // Normal mode, and every past session.
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') => return self.leave_chat(),
+            KeyCode::Char('d') if ctrl => chat.scroll = chat.scroll.saturating_sub(half),
+            KeyCode::Char('u') if ctrl => chat.scroll = chat.scroll.saturating_add(half),
+            KeyCode::Char('j') => chat.scroll = chat.scroll.saturating_sub(1),
+            KeyCode::Char('k') => chat.scroll = chat.scroll.saturating_add(1),
+            KeyCode::Char('G') => chat.scroll = 0,
+            // Drawing clamps this to the top.
+            KeyCode::Char('g') if pending == Some('g') => chat.scroll = usize::MAX,
+            KeyCode::Char('g') => self.pending = Some('g'),
+            KeyCode::Char('m') => self.open_model_picker(),
+            KeyCode::Char('i') | KeyCode::Enter if !chat.read_only => chat.insert = true,
+            KeyCode::Char('a') if !chat.read_only => {
+                chat.input.right();
+                chat.insert = true;
             }
-            _ => edit_key(&mut chat.input, key),
+            KeyCode::Char('A') if !chat.read_only => {
+                chat.input.end();
+                chat.insert = true;
+            }
+            _ => {}
         }
         Ok(())
     }
 
     /// Handles everything the API worker threads have sent since the last call.
     pub fn poll_stream(&mut self) -> Result<()> {
+        while let Ok((id, result)) = self.models_rx.try_recv() {
+            if let Some(Modal::Model(picker)) = &mut self.modal
+                && picker.id == id
+            {
+                picker.loaded(result);
+            }
+        }
         while let Ok((turn_id, event)) = self.rx.try_recv() {
             let Screen::Chat(chat) = &mut self.screen else {
                 continue;
@@ -844,7 +1048,10 @@ impl App {
 }
 
 fn edit_key(input: &mut Input, key: KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
+        KeyCode::Char('w') if ctrl => input.delete_word(),
+        KeyCode::Char('u') if ctrl => input.delete_to_line_start(),
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => input.insert(c),
         KeyCode::Backspace => input.backspace(),
         KeyCode::Delete => input.delete(),
