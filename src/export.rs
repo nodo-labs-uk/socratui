@@ -36,8 +36,8 @@ pub fn anki_text(cards: &[Card]) -> String {
     );
     for card in cards {
         // "::" nests decks in Anki, so a title must not contain it.
-        let deck = format!("Socratik::{}", card.topic_title.replace("::", " "));
-        let mut tags = vec!["socratik".to_string(), tag(&card.topic_title)];
+        let deck = format!("Socratui::{}", card.topic_title.replace("::", " "));
+        let mut tags = vec!["socratui".to_string(), tag(&card.topic_title)];
         if let Some(subskill) = &card.subskill {
             tags.push(tag(subskill));
         }
@@ -73,7 +73,7 @@ mod tests {
         assert_eq!(rows[3], "#deck column:3");
         assert_eq!(
             rows[5],
-            "What does Vec&lt;T&gt;    mean?\tline one<br>line two\tSocratik::Rust: Lifetimes & Borrowing\tsocratik rust-lifetimes-borrowing elision-rules"
+            "What does Vec&lt;T&gt;    mean?\tline one<br>line two\tSocratui::Rust: Lifetimes & Borrowing\tsocratui rust-lifetimes-borrowing elision-rules"
         );
     }
 }

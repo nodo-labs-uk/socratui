@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="720" height="220" viewBox="0 0 720 220" role="img" aria-label="Socratik: a Socratic tutor in your terminal">
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="220" viewBox="0 0 720 220" role="img" aria-label="Socratui: a Socratic tutor in your terminal">
   <!-- A question in a speech bubble, in front of a small stack of flashcards, and the name. -->
   <rect width="720" height="220" rx="20" fill="#282c34"/>
   <g transform="translate(40 34) scale(1.25)">
@@ -7,7 +7,7 @@
     <path d="M14 30 h62 a10 10 0 0 1 10 10 v34 a10 10 0 0 1 -10 10 h-36 l-14 14 v-14 h-12 a10 10 0 0 1 -10 -10 v-34 a10 10 0 0 1 10 -10 z" fill="#56b6c2"/>
     <text x="45" y="77" text-anchor="middle" font-family="'JetBrains Mono','DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="44" font-weight="bold" fill="#282c34">?</text>
   </g>
-  <text x="196" y="122" font-family="'JetBrains Mono','DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="78" font-weight="bold" fill="#ffffff">socratik</text>
+  <text x="196" y="122" font-family="'JetBrains Mono','DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="78" font-weight="bold" fill="#ffffff">socratui</text>
   <text x="200" y="164" font-family="'JetBrains Mono','DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="21" fill="#56b6c2">a Socratic tutor in your terminal</text>
   <text x="200" y="192" font-family="'JetBrains Mono','DejaVu Sans Mono',Menlo,Consolas,monospace" font-size="16" fill="#9099a6">learn · review · flashcards</text>
 </svg>
