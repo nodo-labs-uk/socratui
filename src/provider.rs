@@ -58,6 +58,22 @@ impl Kind {
         }
     }
 
+    /// Shown in the model picker until the provider's own list arrives,
+    /// and if it never does.
+    pub fn presets(self) -> &'static [&'static str] {
+        match self {
+            Kind::Anthropic => &[
+                "claude-fable-5-2",
+                "claude-opus-5-5",
+                "claude-sonnet-5-5",
+                "claude-haiku-5-5",
+            ],
+            Kind::OpenAi => &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+            Kind::HuggingFace => &["openai/gpt-oss-120b", "deepseek-ai/DeepSeek-R1-0528"],
+            Kind::Local => &[],
+        }
+    }
+
     pub fn default_model(self) -> &'static str {
         match self {
             Kind::Anthropic => "claude-fable-5-2",

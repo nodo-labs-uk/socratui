@@ -140,6 +140,73 @@ fn events(response: ureq::Response) -> impl Iterator<Item = Result<Value, String
         })
 }
 
+// ---- the provider's list of models ----
+
+/// Asks the provider which models it offers, keeping those that can tutor.
+pub fn list_models(provider: &Provider) -> Result<Vec<String>, String> {
+    let base = provider.base_url.trim_end_matches('/');
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(20))
+        .build();
+    let request = if provider.kind == Kind::Anthropic {
+        agent
+            .get(&format!("{base}/models?limit=100"))
+            .set("x-api-key", &provider.key)
+            .set("anthropic-version", "2023-06-01")
+    } else if provider.key.is_empty() {
+        agent.get(&format!("{base}/models"))
+    } else {
+        agent
+            .get(&format!("{base}/models"))
+            .set("authorization", &format!("Bearer {}", provider.key))
+    };
+    let body: Value = match request.call() {
+        Ok(response) => response.into_json().map_err(|e| e.to_string())?,
+        Err(ureq::Error::Status(code, _)) => return Err(format!("the list failed with {code}")),
+        Err(e) => return Err(e.to_string()),
+    };
+    Ok(chat_models(provider.kind, &body))
+}
+
+/// The ids in a `/models` reply that are worth offering for tutoring.
+fn chat_models(kind: Kind, body: &Value) -> Vec<String> {
+    let entries = body["data"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    // Hugging Face marks which of its providers can call tools; when it does,
+    // models that no provider runs with tools are left out.
+    let marks_tools = entries.iter().any(|m| {
+        m["providers"]
+            .as_array()
+            .is_some_and(|p| p.iter().any(|p| p.get("supports_tools").is_some()))
+    });
+    entries
+        .iter()
+        .filter(|m| match kind {
+            Kind::HuggingFace if marks_tools => m["providers"]
+                .as_array()
+                .is_some_and(|p| p.iter().any(|p| p["supports_tools"] == true)),
+            // OpenAI's list also has embedding, audio and image models.
+            Kind::OpenAi => {
+                let id = m["id"].as_str().unwrap_or("");
+                id.starts_with("gpt-")
+                    && ![
+                        "audio",
+                        "tts",
+                        "transcribe",
+                        "realtime",
+                        "image",
+                        "search",
+                        "embedding",
+                    ]
+                    .iter()
+                    .any(|skip| id.contains(skip))
+            }
+            _ => true,
+        })
+        .filter_map(|m| m["id"].as_str().map(str::to_string))
+        .collect()
+}
+
 // ---- Anthropic ----
 
 fn anthropic_body(req: &Request) -> Value {
@@ -659,5 +726,28 @@ mod tests {
         );
         assert!(acc.feed(&json!({"error": "Model not supported"})).is_err());
         assert!(OpenAiAccumulator::default().finish().is_err());
+    }
+
+    #[test]
+    fn keeps_the_models_that_can_tutor() {
+        let openai = json!({"data": [
+            {"id": "gpt-5.6-sol"}, {"id": "gpt-realtime"}, {"id": "text-embedding-3-large"},
+            {"id": "gpt-image-2"}, {"id": "gpt-5.6-luna"}
+        ]});
+        assert_eq!(
+            chat_models(Kind::OpenAi, &openai),
+            ["gpt-5.6-sol", "gpt-5.6-luna"]
+        );
+
+        let hf = json!({"data": [
+            {"id": "a/tools", "providers": [{"provider": "x", "supports_tools": false}, {"provider": "y", "supports_tools": true}]},
+            {"id": "b/no-tools", "providers": [{"provider": "x", "supports_tools": false}]}
+        ]});
+        assert_eq!(chat_models(Kind::HuggingFace, &hf), ["a/tools"]);
+        // Without the marks, nothing is left out.
+        let plain = json!({"data": [{"id": "a"}, {"id": "b"}]});
+        assert_eq!(chat_models(Kind::HuggingFace, &plain), ["a", "b"]);
+        assert_eq!(chat_models(Kind::Local, &plain), ["a", "b"]);
+        assert!(chat_models(Kind::Anthropic, &json!({"error": "x"})).is_empty());
     }
 }

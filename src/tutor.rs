@@ -1,4 +1,8 @@
 //! The Socratic tutor: system prompt, the tools it can call, and what they do.
+//!
+//! The prompt's method is adapted from the socratic-tutor skill in
+//! https://github.com/janestreet/agent_skills (MIT, © 2026 Jane Street Group,
+//! LLC). LICENSE has its notice.
 
 use crate::db::{Db, Subskill, Topic};
 use crate::srs::Grade;

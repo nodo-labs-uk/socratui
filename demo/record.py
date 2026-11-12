@@ -65,6 +65,14 @@ class Model:
             def log_message(self, *a):
                 pass
 
+            def do_GET(self):  # orphan-ok: http.server calls it for the picker's model list
+                body = json.dumps({"data": [{"id": m} for m in MODELS]}).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["content-length"])))
                 model.answer(self, body)
@@ -124,6 +132,8 @@ class Model:
 
 
 MODEL = None
+MODELS = ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5",
+          "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"]
 
 
 # ---- seeding the database ----------------------------------------------------
@@ -539,7 +549,7 @@ def scene_hero():
         w.keys("C-f", gap=0.5)
         w.idle()
         time.sleep(4)
-        w.keys("Escape", gap=0.5)
+        w.keys("Escape", "Escape", gap=0.5)
         w.caption = "Each topic keeps its progress, with every level change and the reason for it."
         time.sleep(5)
         w.caption = "f reviews the flashcards that are due. They also export to Anki."
@@ -625,7 +635,15 @@ def scene_learn():
         time.sleep(3)
         w.answer("Passing v would move it. &v only lends a reference, and the borrow ends when "
                  "sum returns, so v can still be used.")
-        time.sleep(5)
+        time.sleep(4)
+        # Normal mode: scroll back through the lesson, then type again.
+        w.keys("Escape", gap=1.5)
+        w.keys(*["k"] * 8, gap=0.25)
+        w.keys("g", "g", gap=1.5)
+        w.keys("G", gap=1.5)
+        w.keys("i", gap=0.5)
+        w.type("The borrow of v[0] is still alive")
+        time.sleep(3)
     return w, rec
 
 
@@ -695,7 +713,7 @@ def scene_review():
         time.sleep(3)
         w.answer("Every row of A. So 3 rows, and B's columns are NULL for the two without a match.")
         time.sleep(4)
-        w.keys("Escape", gap=4.5)
+        w.keys("Escape", "Escape", gap=4.5)
     return w, rec
 
 
@@ -721,7 +739,7 @@ def scene_history():
     w = World(seed=seed_history)
     with Recorder(w) as rec:
         time.sleep(2)
-        w.keys("h", gap=2.5)
+        w.keys("H", gap=2.5)
         w.keys("j", gap=1.5)
         w.keys("Enter", gap=4)
         w.keys("Escape", gap=1.5)
@@ -730,8 +748,21 @@ def scene_history():
     return w, rec
 
 
+def scene_model():
+    w = World(seed=seed_cards)
+    with Recorder(w) as rec:
+        time.sleep(2)
+        w.keys("m", gap=2.5)
+        w.keys("C-n", "C-n", gap=1)
+        w.keys("C-p", gap=1.2)
+        w.type("son", delay=0.15)
+        time.sleep(1.5)
+        w.keys("Enter", gap=3.5)
+    return w, rec
+
+
 SCENES = {"hero": scene_hero, "setup": scene_setup, "learn": scene_learn, "cards": scene_cards,
-          "review": scene_review, "history": scene_history}
+          "review": scene_review, "history": scene_history, "model": scene_model}
 
 
 def main():

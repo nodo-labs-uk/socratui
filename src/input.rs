@@ -66,6 +66,30 @@ impl Input {
         }
     }
 
+    /// Ctrl-W: deletes the word before the cursor, and the spaces after it.
+    pub fn delete_word(&mut self) {
+        let end = self.cursor;
+        while self.cursor > 0 && self.chars[self.cursor - 1] == ' ' {
+            self.cursor -= 1;
+        }
+        while self.cursor > 0 && !self.chars[self.cursor - 1].is_whitespace() {
+            self.cursor -= 1;
+        }
+        if self.cursor == end {
+            // Nothing but a line break before the cursor: join the lines.
+            self.backspace();
+            return;
+        }
+        self.chars.drain(self.cursor..end);
+    }
+
+    /// Ctrl-U: deletes from the start of the line to the cursor.
+    pub fn delete_to_line_start(&mut self) {
+        let end = self.cursor;
+        self.home();
+        self.chars.drain(self.cursor..end);
+    }
+
     /// Wraps the text to `width` columns, breaking after a space where it
     /// can. Returns the rows and the cursor's (column, row) within them.
     pub fn layout(&self, width: usize) -> (Vec<String>, (usize, usize)) {
@@ -163,5 +187,20 @@ mod tests {
         input.insert_str("a abcdefghij");
         assert_eq!(input.layout(5).0, ["a ", "abcde", "fghij", ""]);
         assert_eq!(input.layout(5).1, (0, 3));
+    }
+
+    #[test]
+    fn deletes_words_and_lines_as_vim_insert_mode_does() {
+        let mut input = Input::default();
+        input.insert_str("first line\nsome more  words  ");
+        input.delete_word();
+        assert_eq!(input.text(), "first line\nsome more  ");
+        input.delete_word();
+        assert_eq!(input.text(), "first line\nsome ");
+        input.delete_to_line_start();
+        assert_eq!(input.text(), "first line\n");
+        // At the start of a line, Ctrl-W joins it to the line before.
+        input.delete_word();
+        assert_eq!(input.text(), "first line");
     }
 }
