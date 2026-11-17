@@ -173,7 +173,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             .as_ref()
             .map_or("no model set", |p| p.model.as_str())
     );
-    let gap = (header.width as usize).saturating_sub(9 + due.width());
+    let gap = (header.width as usize)
+        .saturating_sub(9 + due.width())
+        .max(2);
     f.render_widget(
         Line::from(vec![
             Span::styled(" Socratui", bold().fg(ACCENT)),

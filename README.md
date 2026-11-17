@@ -44,6 +44,8 @@ Tell Socratui what you want to learn. The tutor splits the topic into subskills 
 
 ![Continuing a topic: the tutor recalls a past mistake, asks for a prediction about some code, pushes back on the right answer, and raises the level when it holds](docs/media/learn.svg)
 
+When the shape of an idea matters, the tutor draws a small text diagram, often with a gap for you to fill or a wrong arrow to find. Code and diagrams keep their layout in the chat, on cards and in the Anki export.
+
 You can say *show progress*, *harder*, *easier* or *just tell me* at any time. The course ends when every subskill reaches the aim, after a final mixed assessment.
 
 ## Flashcards
