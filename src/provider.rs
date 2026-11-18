@@ -50,7 +50,7 @@ impl Kind {
             Kind::OpenAi => "GPT models. Needs an API key from platform.openai.com.",
             Kind::HuggingFace => "Open models. Needs a token from huggingface.co/settings/tokens.",
             Kind::OpenRouter => {
-                "Hundreds of models behind one key. Needs an API key from openrouter.ai/keys."
+                "Many models behind one key. Needs an API key from openrouter.ai/keys."
             }
             Kind::Local => "A llama.cpp server on this machine, or any OpenAI-style URL.",
         }
