@@ -57,8 +57,12 @@ pub fn svg(dot: &str) -> Result<String, String> {
 }
 
 /// Writes the picture to `path` and opens it in the desktop's default viewer.
-pub fn open(dot: &str, path: &Path) -> Result<(), String> {
+/// Returns false when there is no display to open it on, as over SSH.
+pub fn open(dot: &str, path: &Path) -> Result<bool, String> {
     std::fs::write(path, svg(dot)?).map_err(|e| e.to_string())?;
+    if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
+        return Ok(false);
+    }
     let mut viewer = Command::new("xdg-open")
         .arg(path)
         .stdin(Stdio::null())
@@ -67,7 +71,7 @@ pub fn open(dot: &str, path: &Path) -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("xdg-open: {e}"))?;
     std::thread::spawn(move || viewer.wait());
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(test)]

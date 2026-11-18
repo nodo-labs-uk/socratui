@@ -933,7 +933,11 @@ impl App {
                 self.status = match chat.last_diagram() {
                     None => "The tutor has not drawn a diagram in this session.".into(),
                     Some(dot) => match crate::diagram::open(&dot, &path) {
-                        Ok(()) => format!("Opened the diagram: {}", short_path(&path)),
+                        Ok(true) => format!("Opened the diagram: {}", short_path(&path)),
+                        Ok(false) => format!(
+                            "Saved the diagram; there is no display to open it on: {}",
+                            short_path(&path)
+                        ),
                         Err(e) => format!("Could not open the diagram: {e}"),
                     },
                 };
