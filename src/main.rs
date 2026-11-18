@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod db;
+mod diagram;
 mod export;
 mod input;
 mod provider;

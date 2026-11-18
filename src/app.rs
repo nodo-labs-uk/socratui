@@ -56,6 +56,16 @@ pub struct Chat {
     turn_id: u64,
 }
 
+impl Chat {
+    /// The source of the latest ```dot diagram the tutor wrote.
+    pub fn last_diagram(&self) -> Option<String> {
+        self.items.iter().rev().find_map(|item| match item {
+            Item::Tutor(text) => crate::diagram::last_dot(text),
+            _ => None,
+        })
+    }
+}
+
 pub struct CardReview {
     pub queue: VecDeque<Card>,
     pub revealed: bool,
@@ -639,15 +649,10 @@ impl App {
         }
         let path = self.data_dir.join("anki-export.txt");
         std::fs::write(&path, export::anki_text(&cards))?;
-        let mut shown = path.display().to_string();
-        if let Some(home) = dirs::home_dir().map(|h| h.display().to_string())
-            && let Some(rest) = shown.strip_prefix(&home)
-        {
-            shown = format!("~{rest}");
-        }
         self.status = format!(
-            "Exported {} cards for Anki (File > Import): {shown}",
-            cards.len()
+            "Exported {} cards for Anki (File > Import): {}",
+            cards.len(),
+            short_path(&path)
         );
         Ok(())
     }
@@ -923,6 +928,16 @@ impl App {
                     return self.say("Make flashcards for what we have covered so far.");
                 }
             }
+            KeyCode::Char('o') if ctrl => {
+                let path = self.data_dir.join("diagram.svg");
+                self.status = match chat.last_diagram() {
+                    None => "The tutor has not drawn a diagram in this session.".into(),
+                    Some(dot) => match crate::diagram::open(&dot, &path) {
+                        Ok(()) => format!("Opened the diagram: {}", short_path(&path)),
+                        Err(e) => format!("Could not open the diagram: {e}"),
+                    },
+                };
+            }
             _ if chat.insert && !chat.read_only => match key.code {
                 KeyCode::Esc => chat.insert = false,
                 KeyCode::Char('j') if ctrl => chat.input.insert('\n'),
@@ -1063,5 +1078,14 @@ fn edit_key(input: &mut Input, key: KeyEvent) {
         KeyCode::Home => input.home(),
         KeyCode::End => input.end(),
         _ => {}
+    }
+}
+
+/// `path` with the home folder written as `~`.
+fn short_path(path: &std::path::Path) -> String {
+    let shown = path.display().to_string();
+    match dirs::home_dir().map(|h| h.display().to_string()) {
+        Some(home) if shown.starts_with(&home) => format!("~{}", &shown[home.len()..]),
+        _ => shown,
     }
 }

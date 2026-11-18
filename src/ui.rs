@@ -134,6 +134,9 @@ fn key_hints(app: &App) -> Line<'static> {
                     ("q", "back"),
                 ]
             };
+            if chat.last_diagram().is_some() {
+                keys.insert(keys.len() - 1, ("Ctrl+O", "open diagram"));
+            }
             if chat.error.is_some() {
                 keys.insert(0, ("Ctrl+R", "retry"));
             }
