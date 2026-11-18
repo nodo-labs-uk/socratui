@@ -44,7 +44,7 @@ Tell Socratui what you want to learn. The tutor splits the topic into subskills 
 
 ![Continuing a topic: the tutor recalls a past mistake, asks for a prediction about some code, pushes back on the right answer, and raises the level when it holds](docs/media/learn.svg)
 
-When the shape of an idea matters, the tutor draws a small text diagram, often with a gap for you to fill or a wrong arrow to find. Code and diagrams keep their layout in the chat, on cards and in the Anki export.
+When the shape of an idea matters, the tutor draws a small text diagram, often with a gap for you to fill or a wrong arrow to find. Code and diagrams keep their layout in the chat, on cards and in the Anki export. For nodes and arrows it can write a Graphviz graph instead: the chat shows its source, and **`Ctrl+O` opens it as a picture** in your image viewer.
 
 You can say *show progress*, *harder*, *easier* or *just tell me* at any time. The course ends when every subskill reaches the aim, after a final mixed assessment.
 
@@ -150,6 +150,7 @@ The arrows and `PgUp` `PgDn` work everywhere too.
 | `Alt+Enter`, `Ctrl+J` | new line |
 | `Ctrl+W` `Ctrl+U` | delete the word, or the line, before the cursor (in every text box) |
 | `Ctrl+F` | make flashcards for what you have covered |
+| `Ctrl+O` | open the latest graph as a picture |
 | `Ctrl+R` | retry after an error |
 | `Esc` | normal mode |
 
@@ -162,6 +163,7 @@ The arrows and `PgUp` `PgDn` work everywhere too.
 | `Ctrl+D` `Ctrl+U` | half a page down, up |
 | `gg` `G` | top, end |
 | `Ctrl+F` | make flashcards for what you have covered |
+| `Ctrl+O` | open the latest graph as a picture |
 | `m` | choose the model |
 | `h` `q` `Esc` | back |
 
