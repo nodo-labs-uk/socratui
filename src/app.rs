@@ -401,7 +401,10 @@ impl App {
                 setup.kind = Kind::ALL[(i + 1).min(Kind::ALL.len() - 1)];
             }
             (SetupStep::Provider, KeyCode::Enter) => go(setup, first(setup.kind)),
-            (SetupStep::Provider, KeyCode::Char(c @ '1'..='4')) => {
+            (SetupStep::Provider, KeyCode::Char(c))
+                if c.to_digit(10)
+                    .is_some_and(|n| (1..=Kind::ALL.len() as u32).contains(&n)) =>
+            {
                 setup.kind = Kind::ALL[c as usize - '1' as usize];
                 // `saved` was looked up for the previous choice, so start over.
                 return self.setup_key(KeyEvent::from(KeyCode::Enter));

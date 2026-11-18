@@ -10,15 +10,17 @@ pub enum Kind {
     Anthropic,
     OpenAi,
     HuggingFace,
+    OpenRouter,
     /// A llama.cpp server, or any other server with an OpenAI-style API.
     Local,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 4] = [
+    pub const ALL: [Kind; 5] = [
         Kind::Anthropic,
         Kind::OpenAi,
         Kind::HuggingFace,
+        Kind::OpenRouter,
         Kind::Local,
     ];
 
@@ -27,6 +29,7 @@ impl Kind {
             Kind::Anthropic => "anthropic",
             Kind::OpenAi => "openai",
             Kind::HuggingFace => "huggingface",
+            Kind::OpenRouter => "openrouter",
             Kind::Local => "local",
         }
     }
@@ -36,6 +39,7 @@ impl Kind {
             Kind::Anthropic => "Anthropic",
             Kind::OpenAi => "OpenAI",
             Kind::HuggingFace => "Hugging Face",
+            Kind::OpenRouter => "OpenRouter",
             Kind::Local => "Local model",
         }
     }
@@ -45,6 +49,9 @@ impl Kind {
             Kind::Anthropic => "Claude. Needs an API key from console.anthropic.com.",
             Kind::OpenAi => "GPT models. Needs an API key from platform.openai.com.",
             Kind::HuggingFace => "Open models. Needs a token from huggingface.co/settings/tokens.",
+            Kind::OpenRouter => {
+                "Hundreds of models behind one key. Needs an API key from openrouter.ai/keys."
+            }
             Kind::Local => "A llama.cpp server on this machine, or any OpenAI-style URL.",
         }
     }
@@ -54,6 +61,7 @@ impl Kind {
             Kind::Anthropic => "https://api.anthropic.com/v1",
             Kind::OpenAi => "https://api.openai.com/v1",
             Kind::HuggingFace => "https://router.huggingface.co/v1",
+            Kind::OpenRouter => "https://openrouter.ai/api/v1",
             Kind::Local => "http://localhost:8080/v1",
         }
     }
@@ -70,6 +78,11 @@ impl Kind {
             ],
             Kind::OpenAi => &["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
             Kind::HuggingFace => &["openai/gpt-oss-120b", "deepseek-ai/DeepSeek-R1-0528"],
+            Kind::OpenRouter => &[
+                "anthropic/claude-sonnet-5.5",
+                "openai/gpt-5.6-sol",
+                "openai/gpt-oss-120b",
+            ],
             Kind::Local => &[],
         }
     }
@@ -79,6 +92,7 @@ impl Kind {
             Kind::Anthropic => "claude-fable-5-2",
             Kind::OpenAi => "gpt-5.6-sol",
             Kind::HuggingFace => "openai/gpt-oss-120b",
+            Kind::OpenRouter => "anthropic/claude-sonnet-5.5",
             // llama-server answers with whichever model it loaded.
             Kind::Local => "local",
         }
@@ -109,6 +123,7 @@ impl Provider {
             ("ANTHROPIC_API_KEY", Kind::Anthropic),
             ("OPENAI_API_KEY", Kind::OpenAi),
             ("HF_TOKEN", Kind::HuggingFace),
+            ("OPENROUTER_API_KEY", Kind::OpenRouter),
         ]
         .into_iter()
         .find_map(|(name, kind)| get(name).map(|key| Self::new(kind, key.trim())))
@@ -175,5 +190,27 @@ mod tests {
         );
         assert_eq!(provider.base_url, "https://api.openai.com/v1");
         assert_eq!(Provider::from_env(|_| None), None);
+    }
+
+    #[test]
+    fn detects_openrouter_after_the_other_keys() {
+        let only = |name: &str| (name == "OPENROUTER_API_KEY").then(|| "sk-or-test".to_string());
+        let provider = Provider::from_env(only).unwrap();
+        assert_eq!(provider.kind, Kind::OpenRouter);
+        assert_eq!(provider.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(provider.model, "anthropic/claude-sonnet-5.5");
+
+        let both =
+            |name: &str| matches!(name, "HF_TOKEN" | "OPENROUTER_API_KEY").then(|| "k".to_string());
+        assert_eq!(Provider::from_env(both).unwrap().kind, Kind::HuggingFace);
+    }
+
+    #[test]
+    fn an_openrouter_config_survives_save_and_load() {
+        let path = std::env::temp_dir().join(format!("socratui-or-{}.json", std::process::id()));
+        let provider = Provider::new(Kind::OpenRouter, "sk-or-test");
+        provider.save(&path).unwrap();
+        assert_eq!(Provider::load(&path), Some(provider));
+        std::fs::remove_file(&path).unwrap();
     }
 }

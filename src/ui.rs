@@ -640,7 +640,12 @@ fn draw_modal(f: &mut Frame, modal: &Modal) {
         Modal::Model(_) => PICKER_ROWS as u16 + 7,
         _ => 8,
     };
-    let (width, height) = (screen.width.min(64), height.min(screen.height));
+    // The provider buttons need 76 columns once there are five of them.
+    let width = match modal {
+        Modal::Setup(_) => 76,
+        _ => 64,
+    };
+    let (width, height) = (screen.width.min(width), height.min(screen.height));
     let area = Rect::new(
         screen.x + (screen.width - width) / 2,
         screen.y + (screen.height - height) / 2,
@@ -753,29 +758,43 @@ fn draw_modal(f: &mut Frame, modal: &Modal) {
                 .title(" Who should tutor you? ")
                 .padding(ratatui::widgets::Padding::horizontal(1));
             if setup.step == SetupStep::Provider {
-                let mut buttons = Vec::new();
+                // Buttons wrap onto a second row on narrow terminals, never mid-button.
+                let mut rows = vec![Line::default()];
                 for (i, kind) in Kind::ALL.into_iter().enumerate() {
                     let style = if kind == setup.kind {
                         bold().fg(Color::Black).bg(ACCENT)
                     } else {
                         dim()
                     };
-                    buttons.push(Span::styled(format!(" {} {} ", i + 1, kind.label()), style));
-                    buttons.push(Span::raw(" "));
+                    let button = Span::styled(format!(" {} {} ", i + 1, kind.label()), style);
+                    let row = rows.last_mut().unwrap();
+                    if row.width() > 0 && row.width() + button.width() > inner {
+                        rows.push(Line::default());
+                    }
+                    let row = rows.last_mut().unwrap();
+                    row.push_span(button);
+                    row.push_span(Span::raw(" "));
                 }
-                let lines = vec![
-                    Line::styled("Pick a model provider. You can change it later.", dim()),
-                    Line::from(buttons),
-                    Line::default(),
+                let mut lines = vec![Line::styled(
+                    "Pick a model provider. You can change it later.",
+                    dim(),
+                )];
+                // Two rows of buttons take the blank line, so the dialog keeps its height.
+                let wrapped = rows.len() > 1;
+                lines.extend(rows);
+                if !wrapped {
+                    lines.push(Line::default());
+                }
+                lines.extend([
                     Line::from(setup.kind.about()),
                     Line::default(),
                     hints(&[
-                        ("1-4", "choose"),
+                        (&format!("1-{}", Kind::ALL.len()), "choose"),
                         ("← →", "look"),
                         ("Enter", "choose"),
                         ("Esc", "close"),
                     ]),
-                ];
+                ]);
                 f.render_widget(Paragraph::new(lines).block(block), area);
                 return;
             }

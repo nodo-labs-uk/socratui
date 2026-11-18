@@ -19,7 +19,7 @@ Tell Socratui what you want to learn. The tutor splits the topic into subskills 
 >    repo and run `cargo install --path .`.
 > 2. Make sure `socratui` is on my PATH.
 > 3. Tell me to run `socratui` in a terminal. On first start it asks which
->    model to use, unless ANTHROPIC_API_KEY, OPENAI_API_KEY or HF_TOKEN is set.
+>    model to use, unless ANTHROPIC_API_KEY, OPENAI_API_KEY, HF_TOKEN or OPENROUTER_API_KEY is set.
 >
 > Don't change anything else.
 > ```
@@ -33,7 +33,7 @@ Tell Socratui what you want to learn. The tutor splits the topic into subskills 
 - **It remembers you.** Topics, levels, sessions and the tutor's own notes live in one SQLite file. A new session starts with the skill map, the notes and the end of the last session. The tutor knows where you were without resending every old conversation.
 - **Concepts get reviewed as well as cards.** Each concept you have learnt comes due on a spaced schedule. A review is a short Socratic session on the due concepts. The tutor grades your recall, which sets the next due date, and lowers the level if you've lost it.
 - **Flashcards come from your own work.** The tutor makes cards from what you have worked through, never from material you haven't met. Review them in the app, or export them to Anki.
-- **You choose the model:** Claude, OpenAI, open models through Hugging Face, or a model on your own machine through llama.cpp.
+- **You choose the model:** Claude, OpenAI, open models through Hugging Face, hundreds of models through OpenRouter, or a model on your own machine through llama.cpp.
 - **The keyboard comes first, and the keys follow vim:** `j` `k`, `gg` `G`, `h` back and `l` open, `dd` to delete, and a normal mode in the chat for moving around the lesson. Each screen lists its keys along the bottom.
 
 ## Learning
@@ -83,7 +83,7 @@ The home screen shows each topic's progress, its recent level changes with the r
 
 ## Models
 
-**On first start,** Socratui uses the first of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` or `HF_TOKEN` it finds. With none set, it asks you to:
+**On first start,** Socratui uses the first of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `HF_TOKEN` or `OPENROUTER_API_KEY` it finds. With none set, it asks you to:
 
 1. Pick a provider.
 2. Paste the key, or give the server's address.
@@ -93,7 +93,7 @@ The home screen shows each topic's progress, its recent level changes with the r
 
 ![First start with no key set: choosing a local model, then switching to Anthropic with a key](docs/media/setup.svg)
 
-**`m` switches the model** from any screen, in the middle of a lesson too. The picker asks the provider which models it offers (for Hugging Face, only those it can run with tool calls), and shows a built-in list until the answer arrives. Type to filter, `Ctrl+N` and `Ctrl+P` move, and `Enter` uses the highlighted model, or the name you typed when nothing matches.
+**`m` switches the model** from any screen, in the middle of a lesson too. The picker asks the provider which models it offers (for Hugging Face and OpenRouter, only those that support tool calls), and shows a built-in list until the answer arrives. Type to filter, `Ctrl+N` and `Ctrl+P` move, and `Enter` uses the highlighted model, or the name you typed when nothing matches.
 
 ![m opens the model picker: moving through the provider's models, then filtering to Sonnet](docs/media/model.svg)
 
@@ -102,6 +102,7 @@ The home screen shows each topic's progress, its recent level changes with the r
 | Anthropic | API key | `claude-fable-5-2` |
 | OpenAI | API key | `gpt-5.6-sol` |
 | Hugging Face | token | `openai/gpt-oss-120b` |
+| OpenRouter | API key | `anthropic/claude-sonnet-5.5` |
 | Local model | server address, `http://localhost:8080/v1` by default | whatever the server loaded |
 
 > [!NOTE]

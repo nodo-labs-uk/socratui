@@ -64,6 +64,9 @@ fn run(req: &Request, mut on_delta: impl FnMut(String)) -> Result<Reply, String>
         acc.finish()
     } else {
         let mut headers = Vec::new();
+        if provider.kind == Kind::OpenRouter {
+            headers.push(("x-title", "Socratui".to_string()));
+        }
         if !provider.key.is_empty() {
             headers.push(("authorization", format!("Bearer {}", provider.key)));
         }
@@ -179,6 +182,9 @@ fn chat_models(kind: Kind, body: &Value) -> Vec<String> {
             .as_array()
             .is_some_and(|p| p.iter().any(|p| p.get("supports_tools").is_some()))
     });
+    let marks_params = entries
+        .iter()
+        .any(|m| m.get("supported_parameters").is_some());
     entries
         .iter()
         .filter(|m| match kind {
@@ -201,6 +207,11 @@ fn chat_models(kind: Kind, body: &Value) -> Vec<String> {
                     .iter()
                     .any(|skip| id.contains(skip))
             }
+            // OpenRouter lists hundreds of models; the tutor needs tool calls.
+            // Without the field, nothing is left out.
+            Kind::OpenRouter if marks_params => m["supported_parameters"]
+                .as_array()
+                .is_some_and(|p| p.iter().any(|p| p == "tools")),
             _ => true,
         })
         .filter_map(|m| m["id"].as_str().map(str::to_string))
@@ -747,6 +758,12 @@ mod tests {
         // Without the marks, nothing is left out.
         let plain = json!({"data": [{"id": "a"}, {"id": "b"}]});
         assert_eq!(chat_models(Kind::HuggingFace, &plain), ["a", "b"]);
+        let or = json!({"data": [
+            {"id": "a/tools", "supported_parameters": ["temperature", "tools"]},
+            {"id": "b/no-tools", "supported_parameters": ["temperature"]}
+        ]});
+        assert_eq!(chat_models(Kind::OpenRouter, &or), ["a/tools"]);
+        assert_eq!(chat_models(Kind::OpenRouter, &plain), ["a", "b"]);
         assert_eq!(chat_models(Kind::Local, &plain), ["a", "b"]);
         assert!(chat_models(Kind::Anthropic, &json!({"error": "x"})).is_empty());
     }
