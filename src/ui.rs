@@ -173,6 +173,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             .as_ref()
             .map_or("no model set", |p| p.model.as_str())
     );
+    // On narrow terminals the text shrinks, then the end is cut with "…".
+    let room = (header.width as usize).saturating_sub(11);
+    let due = if due.width() > room {
+        fit(
+            &due.replace("   ", "  ").replace("flashcards", "cards"),
+            room,
+        )
+    } else {
+        due
+    };
     let gap = (header.width as usize)
         .saturating_sub(9 + due.width())
         .max(2);
@@ -779,14 +789,10 @@ fn draw_modal(f: &mut Frame, modal: &Modal) {
                     "Pick a model provider. You can change it later.",
                     dim(),
                 )];
-                // Two rows of buttons take the blank line, so the dialog keeps its height.
-                let wrapped = rows.len() > 1;
                 lines.extend(rows);
-                if !wrapped {
-                    lines.push(Line::default());
-                }
+                lines.push(Line::default());
+                lines.extend(wrap(setup.kind.about(), inner).into_iter().map(Line::from));
                 lines.extend([
-                    Line::from(setup.kind.about()),
                     Line::default(),
                     hints(&[
                         (&format!("1-{}", Kind::ALL.len()), "choose"),
@@ -795,6 +801,15 @@ fn draw_modal(f: &mut Frame, modal: &Modal) {
                         ("Esc", "close"),
                     ]),
                 ]);
+                // On narrow terminals the buttons and text take more rows. Blank
+                // lines go first, so the dialog keeps its height.
+                let room = area.height.saturating_sub(2) as usize;
+                while lines.len() > room {
+                    match lines.iter().rposition(|l| l.width() == 0) {
+                        Some(i) => lines.remove(i),
+                        None => break,
+                    };
+                }
                 f.render_widget(Paragraph::new(lines).block(block), area);
                 return;
             }
