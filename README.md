@@ -24,7 +24,7 @@ Tell Socratui what you want to learn. The tutor splits the topic into subskills 
 > Don't change anything else.
 > ```
 
-**Contents:** [Design principles](#design-principles) · [Learning](#learning) · [Flashcards](#flashcards) · [Concept review](#concept-review) · [History](#history) · [Models](#models) · [Keys](#keys) · [Compared with other tools](#compared-with-other-tools) · [Install](#install) · [Files](#files) · [Development](#development) · [Licence](#licence)
+**Contents:** [Design principles](#design-principles) · [Learning](#learning) · [Flashcards](#flashcards) · [Concept review](#concept-review) · [History](#history) · [Learning plan](#learning-plan) · [Models](#models) · [Keys](#keys) · [Compared with other tools](#compared-with-other-tools) · [Install](#install) · [Files](#files) · [Development](#development) · [Licence](#licence)
 
 ## Design principles
 
@@ -81,6 +81,14 @@ The home screen shows each topic's progress, its recent level changes with the r
 
 ![The session history, opening a past review and a past lesson](docs/media/history.svg)
 
+## Learning plan
+
+A learning plan is a JSON file that lists skills to learn, each with a weight. Any tool can write one: the format is in [docs/plan-format.md](docs/plan-format.md). Socratui reads `plan.json` in its data folder, or the file that `plan_path` in `config.json` names.
+
+**`p` opens the plan.** Skills are ranked by weight and by how far you are from the aim, so the next skill to learn comes first. A skill that another one builds on, and that you know little of, moves up and says `before` the skill it unlocks. `Enter` starts a topic for the skill, with a hint about where you are likely to start, or continues the topic you already have. Your levels in that topic then move the skill down the list, and a skill that reaches the aim goes to *Done*.
+
+The plan can also suggest tracks to branch out into. `b` follows a track, and its skills move up the list until you unfollow it. Socratui reads the file again when it changes, so a tool can replace it at any time.
+
 ## Models
 
 **On first start,** Socratui uses the first of `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `HF_TOKEN` or `OPENROUTER_API_KEY` it finds. With none set, it asks you to:
@@ -134,6 +142,7 @@ The arrows and `PgUp` `PgDn` work everywhere too.
 | Key | What it does |
 |---|---|
 | `n` | new topic |
+| `p` | the learning plan |
 | `r` | review the topic's due concepts |
 | `f` | review the flashcards that are due |
 | `H` | session history |
@@ -141,6 +150,14 @@ The arrows and `PgUp` `PgDn` work everywhere too.
 | `s` | provider and key |
 | `dd` | delete the topic, with its sessions and cards, after a confirmation |
 | `q` | quit |
+
+**Learning plan**
+
+| Key | What it does |
+|---|---|
+| `Enter` | start or continue the skill's topic; on *Done*, show or hide the skills there |
+| `b` | follow or unfollow the track |
+| `Tab` `q` | back to the topics |
 
 **Chat, insert mode**
 
@@ -207,6 +224,7 @@ Everything is in `~/.local/share/socratui/`, or in `$SOCRATUI_DATA_DIR` if set:
 - `socratui.db`: topics, subskills and levels, every level change, sessions and their messages, and flashcards with their review history.
 - `config.json`: the provider, its address, the key and the model, readable only by you.
 - `anki-export.txt`: written by `e`.
+- `plan.json`: the learning plan, if you have one.
 
 `SOCRATUI_MODEL` overrides the saved model name for one run.
 

@@ -526,7 +526,6 @@ impl Db {
 
     // ---- plan ----
 
-    #[allow(dead_code)]
     pub fn link_plan_skill(&self, skill_id: &str, topic_id: i64) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO plan_links(skill_id, topic_id) VALUES (?1, ?2)",
@@ -535,7 +534,6 @@ impl Db {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn plan_links(&self) -> Result<HashMap<String, i64>> {
         let mut stmt = self
             .conn
@@ -546,7 +544,6 @@ impl Db {
 
     /// Moves a link to the id that replaced `old_id`. Returns false and changes
     /// nothing when `old_id` has no link or `new_id` is already linked.
-    #[allow(dead_code)]
     pub fn relink_plan_skill(&self, old_id: &str, new_id: &str) -> Result<bool> {
         let changed = self.conn.execute(
             "UPDATE plan_links SET skill_id = ?2 WHERE skill_id = ?1
@@ -556,7 +553,6 @@ impl Db {
         Ok(changed > 0)
     }
 
-    #[allow(dead_code)]
     pub fn follow_track(&self, track_id: &str, now: i64) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO followed_tracks(track_id, followed_at) VALUES (?1, ?2)",
@@ -565,7 +561,6 @@ impl Db {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn unfollow_track(&self, track_id: &str) -> Result<()> {
         self.conn.execute(
             "DELETE FROM followed_tracks WHERE track_id = ?1",
@@ -574,7 +569,6 @@ impl Db {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn followed_tracks(&self) -> Result<HashSet<String>> {
         let mut stmt = self.conn.prepare("SELECT track_id FROM followed_tracks")?;
         let rows = stmt.query_map([], |r| r.get(0))?;

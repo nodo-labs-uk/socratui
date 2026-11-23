@@ -46,6 +46,16 @@ pub struct Plan {
     pub tracks: Vec<Track>,
 }
 
+impl Plan {
+    /// The name of the skill with this id, or the id if the plan lacks it.
+    pub fn name_of<'a>(&'a self, id: &'a str) -> &'a str {
+        self.skills
+            .iter()
+            .find(|s| s.id == id)
+            .map_or(id, |s| s.name.as_str())
+    }
+}
+
 fn text(v: &Value, key: &str, at: &str) -> Result<String, String> {
     v[key]
         .as_str()
@@ -166,7 +176,7 @@ pub fn plan_path(data_dir: &Path) -> PathBuf {
     }
 }
 
-const DEFAULT_TARGET: i64 = 4;
+pub const DEFAULT_TARGET: i64 = 4;
 const PREREQUISITE_BELOW: f64 = 2.0;
 const FOLLOWED_BOOST: f64 = 1.5;
 

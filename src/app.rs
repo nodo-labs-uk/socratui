@@ -4,15 +4,17 @@ use crate::api::{self, Reply, StreamEvent};
 use crate::db::{Card, Db, LevelEvent, SessionRow, Subskill, Topic};
 use crate::export;
 use crate::input::Input;
+use crate::plan::{self, Plan, Progress, Ranking};
 use crate::provider::{Kind, Provider};
 use crate::srs::Grade;
 use crate::tutor::{self, Mode};
 use anyhow::Result;
 use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use serde_json::{Value, json};
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::time::SystemTime;
 
 const PREVIOUS_SESSION_MESSAGES: usize = 8;
 const PREVIOUS_SESSION_CHARS: usize = 600;
@@ -72,11 +74,83 @@ pub struct CardReview {
     pub done: usize,
 }
 
+pub enum PlanState {
+    Missing(PathBuf),
+    Broken(String),
+    Loaded(Plan),
+}
+
+/// One selectable row of the plan screen.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PlanRow {
+    /// An index into `ranking.next`.
+    Next(usize),
+    /// An index into the plan's tracks.
+    Track(usize),
+    /// A followed track that is no longer in the plan.
+    Gone(String),
+    Done,
+    /// An index into `ranking.done`.
+    DoneSkill(usize),
+}
+
+pub struct PlanView {
+    pub state: PlanState,
+    pub ranking: Ranking,
+    pub followed: HashSet<String>,
+    /// Index into `rows()`.
+    pub selected: usize,
+    pub done_open: bool,
+    mtime: Option<SystemTime>,
+}
+
+impl PlanView {
+    pub fn tracks(&self) -> &[plan::Track] {
+        match &self.state {
+            PlanState::Loaded(plan) => &plan.tracks,
+            _ => &[],
+        }
+    }
+
+    /// Followed tracks that the plan no longer lists, sorted.
+    pub fn gone(&self) -> Vec<String> {
+        let mut gone: Vec<String> = self
+            .followed
+            .iter()
+            .filter(|id| !self.tracks().iter().any(|t| &t.id == *id))
+            .cloned()
+            .collect();
+        gone.sort();
+        gone
+    }
+
+    pub fn rows(&self) -> Vec<PlanRow> {
+        if !matches!(self.state, PlanState::Loaded(_)) {
+            return Vec::new();
+        }
+        let mut rows: Vec<PlanRow> = (0..self.ranking.next.len()).map(PlanRow::Next).collect();
+        rows.extend((0..self.tracks().len()).map(PlanRow::Track));
+        rows.extend(self.gone().into_iter().map(PlanRow::Gone));
+        if !self.ranking.done.is_empty() {
+            rows.push(PlanRow::Done);
+            if self.done_open {
+                rows.extend((0..self.ranking.done.len()).map(PlanRow::DoneSkill));
+            }
+        }
+        rows
+    }
+}
+
+fn modified(path: &std::path::Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 pub enum Screen {
     Home,
     Chat(Box<Chat>),
     Cards(CardReview),
     History,
+    Plan(PlanView),
 }
 
 pub enum ConfirmAction {
@@ -334,6 +408,7 @@ impl App {
                     Screen::Chat(_) => self.chat_key(key),
                     Screen::Cards(_) => self.cards_key(key),
                     Screen::History => self.history_key(key),
+                    Screen::Plan(_) => self.plan_key(key),
                 }
             }
             Event::Paste(text) => {
@@ -540,7 +615,7 @@ impl App {
                 KeyCode::Enter if !input.is_blank() => {
                     let id = self.db.create_topic(input.text().trim(), *target, now())?;
                     self.modal = None;
-                    self.start_chat(id, Mode::Learn)?;
+                    self.start_chat(id, Mode::Learn, None)?;
                 }
                 _ => edit_key(input, key),
             },
@@ -590,15 +665,16 @@ impl App {
                     target: 4,
                 })
             }
+            KeyCode::Char('p') => self.open_plan()?,
             KeyCode::Enter | KeyCode::Char('l') => {
                 if let Some((id, _)) = topic {
-                    self.start_chat(id, Mode::Learn)?;
+                    self.start_chat(id, Mode::Learn, None)?;
                 }
             }
             KeyCode::Char('r') => {
                 if let Some((id, _)) = topic {
                     if self.topics[self.selected].concepts_due > 0 {
-                        self.start_chat(id, Mode::Review)?;
+                        self.start_chat(id, Mode::Review, None)?;
                     } else {
                         self.status = "No concepts are due for review in this topic.".into();
                     }
@@ -655,6 +731,169 @@ impl App {
             short_path(&path)
         );
         Ok(())
+    }
+
+    // ---- learning plan ----
+
+    /// Reads the plan file, moves links from merged skill ids, and ranks it.
+    fn load_plan(&self) -> Result<PlanView> {
+        let path = plan::plan_path(&self.data_dir);
+        let mtime = modified(&path);
+        let state = match std::fs::read_to_string(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => PlanState::Missing(path),
+            Err(e) => PlanState::Broken(e.to_string()),
+            Ok(text) => match plan::parse(&text) {
+                Ok(plan) => PlanState::Loaded(plan),
+                Err(e) => PlanState::Broken(e),
+            },
+        };
+        if let PlanState::Loaded(plan) = &state {
+            for skill in &plan.skills {
+                for old in &skill.former_ids {
+                    self.db.relink_plan_skill(old, &skill.id)?;
+                }
+            }
+        }
+        let mut view = PlanView {
+            state,
+            ranking: Ranking {
+                next: Vec::new(),
+                done: Vec::new(),
+            },
+            followed: HashSet::new(),
+            selected: 0,
+            done_open: false,
+            mtime,
+        };
+        self.rank_plan(&mut view)?;
+        Ok(view)
+    }
+
+    /// Ranks the plan against the levels of the linked topics.
+    fn rank_plan(&self, view: &mut PlanView) -> Result<()> {
+        view.followed = self.db.followed_tracks()?;
+        if let PlanState::Loaded(plan) = &view.state {
+            let mut progress = HashMap::new();
+            for (skill, topic_id) in self.db.plan_links()? {
+                let subskills = self.db.subskills(topic_id)?;
+                // Without subskills the skill's start level still applies.
+                if subskills.is_empty() {
+                    continue;
+                }
+                let level =
+                    subskills.iter().map(|s| s.level as f64).sum::<f64>() / subskills.len() as f64;
+                let target = self.db.topic(topic_id)?.target_level;
+                progress.insert(skill, Progress { level, target });
+            }
+            view.ranking = plan::rank(plan, &progress, &view.followed);
+        }
+        view.selected = view.selected.min(view.rows().len().saturating_sub(1));
+        Ok(())
+    }
+
+    fn open_plan(&mut self) -> Result<()> {
+        self.screen = Screen::Plan(self.load_plan()?);
+        Ok(())
+    }
+
+    /// Reloads the open plan screen when the file's modification time changes.
+    fn reload_plan_if_changed(&mut self) -> Result<()> {
+        let Screen::Plan(view) = &self.screen else {
+            return Ok(());
+        };
+        if modified(&plan::plan_path(&self.data_dir)) == view.mtime {
+            return Ok(());
+        }
+        let mut fresh = self.load_plan()?;
+        if let Screen::Plan(view) = &mut self.screen {
+            fresh.done_open = view.done_open;
+            fresh.selected = view.selected.min(fresh.rows().len().saturating_sub(1));
+            *view = fresh;
+        }
+        Ok(())
+    }
+
+    fn plan_key(&mut self, key: KeyEvent) -> Result<()> {
+        let pending = self.pending.take();
+        let Screen::Plan(mut view) = std::mem::replace(&mut self.screen, Screen::Home) else {
+            return Ok(());
+        };
+        let rows = view.rows();
+        let last = rows.len().saturating_sub(1);
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') | KeyCode::Tab => {
+                return Ok(());
+            }
+            KeyCode::Down | KeyCode::Char('j') => view.selected = (view.selected + 1).min(last),
+            KeyCode::Up | KeyCode::Char('k') => view.selected = view.selected.saturating_sub(1),
+            KeyCode::Char('g') if pending == Some('g') => view.selected = 0,
+            KeyCode::Char('g') => self.pending = Some('g'),
+            KeyCode::Char('G') => view.selected = last,
+            KeyCode::Enter | KeyCode::Char('l') => match rows.get(view.selected) {
+                Some(PlanRow::Done) => view.done_open = !view.done_open,
+                Some(PlanRow::Next(i)) => {
+                    let id = view.ranking.next[*i].id.clone();
+                    return self.start_skill(&view, &id);
+                }
+                Some(PlanRow::DoneSkill(i)) => {
+                    let id = view.ranking.done[*i].id.clone();
+                    return self.start_skill(&view, &id);
+                }
+                _ => {}
+            },
+            KeyCode::Char('b') => {
+                let id = match rows.get(view.selected) {
+                    Some(PlanRow::Track(i)) => Some(view.tracks()[*i].id.clone()),
+                    Some(PlanRow::Gone(id)) => Some(id.clone()),
+                    _ => None,
+                };
+                if let Some(id) = id {
+                    if view.followed.contains(&id) {
+                        self.db.unfollow_track(&id)?;
+                    } else {
+                        self.db.follow_track(&id, now())?;
+                    }
+                    self.rank_plan(&mut view)?;
+                }
+            }
+            _ => {}
+        }
+        self.screen = Screen::Plan(view);
+        Ok(())
+    }
+
+    /// Opens the topic linked to a plan skill, or creates and links one.
+    fn start_skill(&mut self, view: &PlanView, skill_id: &str) -> Result<()> {
+        let PlanState::Loaded(plan) = &view.state else {
+            return Ok(());
+        };
+        let Some(skill) = plan.skills.iter().find(|s| s.id == skill_id) else {
+            return Ok(());
+        };
+        if let Some(&topic_id) = self.db.plan_links()?.get(skill_id) {
+            return self.start_chat(topic_id, Mode::Learn, None);
+        }
+        let topic_id = self
+            .db
+            .create_topic(&skill.name, plan::DEFAULT_TARGET, now())?;
+        self.db.link_plan_skill(skill_id, topic_id)?;
+        let mut hint = String::new();
+        if let Some(level) = skill.start_level {
+            hint += &format!(
+                "Starting level estimate: {level} of {}. ",
+                plan::DEFAULT_TARGET
+            );
+        }
+        if !skill.prerequisites.is_empty() {
+            let names: Vec<&str> = skill
+                .prerequisites
+                .iter()
+                .map(|id| plan.name_of(id))
+                .collect();
+            hint += &format!("It builds on: {}. ", names.join(", "));
+        }
+        self.refresh_home()?;
+        self.start_chat(topic_id, Mode::Learn, Some(hint).filter(|h| !h.is_empty()))
     }
 
     fn history_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -790,7 +1029,8 @@ impl App {
         Ok(lines.split_off(skip))
     }
 
-    fn start_chat(&mut self, topic_id: i64, mode: Mode) -> Result<()> {
+    /// `hint` goes into the opening message of a new topic, before "Please begin."
+    fn start_chat(&mut self, topic_id: i64, mode: Mode, hint: Option<String>) -> Result<()> {
         let now = now();
         let topic = self.db.topic(topic_id)?;
         let subskills = self.db.subskills(topic_id)?;
@@ -804,7 +1044,11 @@ impl App {
         });
         let opening = match (mode, subskills.is_empty()) {
             (Mode::Review, _) => "Start the review of the due concepts.".to_string(),
-            (Mode::Learn, true) => format!("I want to learn: {}. Please begin.", topic.title),
+            (Mode::Learn, true) => format!(
+                "I want to learn: {}. {}Please begin.",
+                topic.title,
+                hint.unwrap_or_default()
+            ),
             (Mode::Learn, false) => "Let's continue the course where we left off.".to_string(),
         };
         let session_id = self.db.create_session(topic_id, mode.kind(), now)?;
@@ -980,8 +1224,10 @@ impl App {
         Ok(())
     }
 
-    /// Handles everything the API worker threads have sent since the last call.
+    /// Handles everything the API worker threads have sent since the last call,
+    /// and reloads the plan screen if its file changed.
     pub fn poll_stream(&mut self) -> Result<()> {
+        self.reload_plan_if_changed()?;
         while let Ok((id, result)) = self.models_rx.try_recv() {
             if let Some(Modal::Model(picker)) = &mut self.modal
                 && picker.id == id
@@ -1086,10 +1332,170 @@ fn edit_key(input: &mut Input, key: KeyEvent) {
 }
 
 /// `path` with the home folder written as `~`.
-fn short_path(path: &std::path::Path) -> String {
+pub fn short_path(path: &std::path::Path) -> String {
     let shown = path.display().to_string();
     match dirs::home_dir().map(|h| h.display().to_string()) {
         Some(home) if shown.starts_with(&home) => format!("~{}", &shown[home.len()..]),
         _ => shown,
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+
+    /// An app on an in-memory database, with `plan` (if any) as its plan file.
+    /// The provider points at a closed port, so requests fail at once and offline.
+    pub(crate) fn app_with_plan(name: &str, plan: Option<&str>) -> App {
+        let dir = std::env::temp_dir().join(format!("socratui-app-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        if let Some(plan) = plan {
+            std::fs::write(dir.join("plan.json"), plan).unwrap();
+        }
+        let provider = Provider {
+            kind: Kind::Local,
+            base_url: "http://127.0.0.1:9".into(),
+            key: String::new(),
+            model: "test".into(),
+        };
+        App::new(Db::in_memory().unwrap(), Some(provider), dir).unwrap()
+    }
+
+    pub(crate) fn press(app: &mut App, code: KeyCode) {
+        app.on_event(Event::Key(KeyEvent::from(code))).unwrap();
+    }
+
+    const ONE_SKILL: &str = r#"{"format":"socratui-plan/1","skills":[
+        {"id":"kubernetes","name":"Kubernetes","weight":0.9,"start_level":1,"prerequisites":["docker"]},
+        {"id":"docker","name":"Docker","weight":0.2,"start_level":3}]}"#;
+
+    fn plan_view(app: &App) -> &PlanView {
+        match &app.screen {
+            Screen::Plan(view) => view,
+            _ => panic!("not on the plan screen"),
+        }
+    }
+
+    fn opening(app: &App) -> String {
+        match &app.screen {
+            Screen::Chat(chat) => chat.messages[0]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .to_string(),
+            _ => panic!("not in a chat"),
+        }
+    }
+
+    #[test]
+    fn missing_plan_shows_empty_state() {
+        let mut app = app_with_plan("missing", None);
+        press(&mut app, KeyCode::Char('p'));
+        match &plan_view(&app).state {
+            PlanState::Missing(path) => assert!(path.ends_with("plan.json")),
+            _ => panic!("expected the empty state"),
+        }
+    }
+
+    #[test]
+    fn broken_plan_shows_one_error() {
+        let mut app = app_with_plan("broken", Some("{"));
+        app.db.create_topic("Rust", 4, 0).unwrap();
+        app.refresh_home().unwrap();
+        press(&mut app, KeyCode::Char('p'));
+        assert!(matches!(plan_view(&app).state, PlanState::Broken(_)));
+        press(&mut app, KeyCode::Char('q'));
+        assert!(matches!(app.screen, Screen::Home));
+        assert!(!app.quit);
+        assert_eq!(app.topics.len(), 1);
+    }
+
+    #[test]
+    fn enter_creates_and_links_topic() {
+        let mut app = app_with_plan("enter", Some(ONE_SKILL));
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Enter);
+        let topics = app.db.topics().unwrap();
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].title, "Kubernetes");
+        assert_eq!(topics[0].target_level, 4);
+        assert_eq!(app.db.plan_links().unwrap()["kubernetes"], topics[0].id);
+        let text = opening(&app);
+        assert!(text.contains("I want to learn: Kubernetes."), "{text}");
+        assert!(text.contains("Starting level estimate: 1 of 4."), "{text}");
+        assert!(text.contains("It builds on: Docker."), "{text}");
+        assert!(text.ends_with("Please begin."), "{text}");
+    }
+
+    #[test]
+    fn enter_reopens_linked_topic() {
+        let mut app = app_with_plan("reopen", Some(ONE_SKILL));
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('q'));
+        assert!(matches!(app.screen, Screen::Home));
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.screen, Screen::Chat(_)));
+        assert_eq!(app.db.topics().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn former_id_relinks_on_load() {
+        let plan = r#"{"format":"socratui-plan/1","skills":[
+            {"id":"kubernetes","name":"Kubernetes","weight":0.9,"former_ids":["k8s"]}]}"#;
+        let mut app = app_with_plan("former", Some(plan));
+        let topic = app.db.create_topic("K8s", 4, 0).unwrap();
+        app.db.link_plan_skill("k8s", topic).unwrap();
+        press(&mut app, KeyCode::Char('p'));
+        let links = app.db.plan_links().unwrap();
+        assert_eq!(links.get("kubernetes"), Some(&topic));
+        assert!(!links.contains_key("k8s"));
+        press(&mut app, KeyCode::Enter);
+        match &app.screen {
+            Screen::Chat(chat) => assert_eq!(chat.topic.id, topic),
+            _ => panic!("not in a chat"),
+        }
+        assert_eq!(app.db.topics().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn b_follows_a_track() {
+        let plan = r#"{"format":"socratui-plan/1","skills":[{"id":"ray","name":"Ray","weight":0.5}],
+            "tracks":[{"id":"ml","name":"ML platform","skills":["ray"]}]}"#;
+        let mut app = app_with_plan("follow", Some(plan));
+        app.db.follow_track("gone", 0).unwrap();
+        press(&mut app, KeyCode::Char('p'));
+        // Rows: Ray, the track, then the followed track that left the plan.
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('b'));
+        assert!(app.db.followed_tracks().unwrap().contains("ml"));
+        press(&mut app, KeyCode::Char('b'));
+        assert!(!app.db.followed_tracks().unwrap().contains("ml"));
+        press(&mut app, KeyCode::Char('G'));
+        press(&mut app, KeyCode::Char('b'));
+        assert!(app.db.followed_tracks().unwrap().is_empty());
+    }
+
+    #[test]
+    fn reloads_when_the_file_changes() {
+        let mut app = app_with_plan("reload", Some(ONE_SKILL));
+        press(&mut app, KeyCode::Char('p'));
+        let path = crate::plan::plan_path(&app.data_dir);
+        let newer =
+            r#"{"format":"socratui-plan/1","skills":[{"id":"rust","name":"Rust","weight":0.5}]}"#;
+        std::fs::write(&path, newer).unwrap();
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        press(&mut app, KeyCode::Char('q'));
+        press(&mut app, KeyCode::Char('p'));
+        let view = plan_view(&app);
+        assert_eq!(view.ranking.next[0].name, "Rust");
     }
 }

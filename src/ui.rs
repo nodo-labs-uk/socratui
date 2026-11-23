@@ -6,7 +6,7 @@ use crate::db::Subskill;
 use crate::provider::Kind;
 use crate::srs::{self, Grade};
 use crate::tutor::{LEVEL_NAMES, Mode};
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -100,6 +100,7 @@ fn key_hints(app: &App) -> Line<'static> {
         Screen::Home => hints(&[
             ("Enter", "learn"),
             ("n", "new topic"),
+            ("p", "plan"),
             ("r", "review concepts"),
             ("f", "flashcards"),
             ("H", "history"),
@@ -152,6 +153,12 @@ fn key_hints(app: &App) -> Line<'static> {
             ("q", "back"),
         ]),
         Screen::History => hints(&[("j k", "move"), ("Enter", "open"), ("q", "back")]),
+        Screen::Plan(_) => hints(&[
+            ("Enter", "start/continue"),
+            ("b", "follow"),
+            ("Tab", "topics"),
+            ("q", "back"),
+        ]),
     }
 }
 
@@ -203,6 +210,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Screen::Chat(chat) => draw_chat(f, body, chat),
         Screen::Cards(review) => cards(f, body, review),
         Screen::History => history(f, body, app),
+        Screen::Plan(view) => plan_screen(f, body, view),
     }
     f.render_widget(
         Line::styled(format!(" {}", app.status), Style::new().fg(Color::Yellow)),
@@ -642,6 +650,233 @@ fn history(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
+// ---- learning plan ----
+
+/// How long ago an RFC 3339 time was, as "updated 2h ago".
+fn age(at: &str, now: DateTime<Utc>) -> Option<String> {
+    let then = DateTime::parse_from_rfc3339(at).ok()?;
+    let minutes = (now - then.with_timezone(&Utc)).num_minutes();
+    Some(match minutes {
+        m if m < 1 => "updated just now".to_string(),
+        m if m < 60 => format!("updated {m}m ago"),
+        m if m < 48 * 60 => format!("updated {}h ago", m / 60),
+        m => format!("updated {}d ago", m / (24 * 60)),
+    })
+}
+
+/// Cuts a row of spans to `width` columns, ending in "…" if it is too long,
+/// and pads it to exactly `width`.
+fn clip(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut room = width;
+    for span in spans {
+        if room == 0 {
+            break;
+        }
+        if span.width() <= room {
+            room -= span.width();
+            out.push(span);
+        } else {
+            out.push(Span::styled(fit(&span.content, room), span.style));
+            room = 0;
+        }
+    }
+    out.push(Span::raw(" ".repeat(room)));
+    out
+}
+
+/// A section heading: ` ─ Next ────`.
+fn rule(title: &str, marker: &str, width: usize) -> Line<'static> {
+    let head = format!("{marker}─ {title} ");
+    let rest = width.saturating_sub(head.width());
+    Line::styled(format!("{head}{}", "─".repeat(rest)), dim())
+}
+
+/// The plan screen's header, then one line per row and heading. The second
+/// value is the index of the selected line.
+fn plan_lines(view: &app::PlanView, width: usize) -> (Vec<Line<'static>>, Option<usize>) {
+    let title = " Learning plan";
+    let mut about = Vec::new();
+    let tracks = view.tracks();
+    let plan = match &view.state {
+        app::PlanState::Loaded(plan) => {
+            about.extend(Some(plan.summary.clone()).filter(|s| !s.is_empty()));
+            about.extend(age(&plan.generated_at, Utc::now()));
+            Some(plan)
+        }
+        _ => None,
+    };
+    let about = fit(&about.join(" · "), width.saturating_sub(title.width() + 2))
+        .trim_end()
+        .to_string();
+    let mut lines = vec![Line::from(vec![
+        Span::styled(title, bold().fg(ACCENT)),
+        Span::raw(" ".repeat(width.saturating_sub(title.width() + about.width()))),
+        Span::styled(about, dim()),
+    ])];
+    let Some(plan) = plan else {
+        lines.push(Line::default());
+        match &view.state {
+            app::PlanState::Missing(path) => lines.extend([
+                Line::from(" No learning plan yet. Put a plan file here:"),
+                Line::from(format!(" {}", app::short_path(path))),
+                Line::styled(" The format is in docs/plan-format.md.", dim()),
+            ]),
+            app::PlanState::Broken(error) => lines.push(Line::styled(
+                format!(" Could not read the plan file: {error}"),
+                Style::new().fg(Color::Red),
+            )),
+            app::PlanState::Loaded(_) => {}
+        }
+        return (lines, None);
+    };
+    let width_of = |spans: &[Span]| spans.iter().map(Span::width).sum::<usize>();
+
+    // Columns: marker and rank (5), name, bar (1 + 7), facts (2 + F), you (1 + 9).
+    // The facts column is as wide as the longest facts, so that on a wide
+    // terminal the level stays next to them.
+    let facts_of = |r: &crate::plan::RankedSkill| {
+        let mut facts = Vec::new();
+        if let Some(before) = &r.before {
+            let sep = if r.facts.is_empty() { "" } else { " · " };
+            facts.push(Span::styled(format!("before {before}{sep}"), dim()));
+        }
+        facts.push(Span::raw(r.facts.join(" · ")));
+        facts
+    };
+    let ranked: Vec<_> = view.ranking.next.iter().chain(&view.ranking.done).collect();
+    let longest = ranked.iter().map(|r| r.name.width()).max().unwrap_or(0);
+    let mut name_width = longest.clamp(6, 20);
+    if width.saturating_sub(25 + name_width) < 10 {
+        name_width = width.saturating_sub(35).max(6);
+    }
+    let longest_facts = ranked.iter().map(|r| width_of(&facts_of(r))).max();
+    let facts_width = width
+        .saturating_sub(25 + name_width)
+        .min(longest_facts.unwrap_or(0));
+    let skill_row = |marker: &str, rank: String, r: &crate::plan::RankedSkill, done: bool| {
+        let (arrow, arrow_colour) = match r.trend {
+            Some(crate::plan::Trend::Up) => ("▲", Color::Green),
+            Some(crate::plan::Trend::Down) => ("▼", Color::Red),
+            _ => (" ", Color::Reset),
+        };
+        let mut spans = vec![
+            Span::raw(format!("{marker}{rank:>2}  ")),
+            Span::raw(fit(&r.name, name_width)),
+            Span::styled(
+                format!(" {}  ", bar((r.weight * 7.0).round() as usize, 7)),
+                Style::new().fg(if done { Color::Green } else { ACCENT }),
+            ),
+        ];
+        spans.extend(clip(facts_of(r), facts_width));
+        spans.push(Span::raw(format!(
+            " {:>7} ",
+            format!("you {:.0}/{}", r.level, r.target)
+        )));
+        spans.push(Span::styled(arrow, Style::new().fg(arrow_colour)));
+        Line::from(spans)
+    };
+
+    // Track rows: marker (2), name, info (2 + I), then "✓ following".
+    let info_of = |t: &crate::plan::Track| {
+        let mut info = vec![Span::raw(t.facts.join(" · "))];
+        if !t.skills.is_empty() {
+            let gap = if t.facts.is_empty() { "" } else { "  " };
+            let names: Vec<&str> = t.skills.iter().take(3).map(|id| plan.name_of(id)).collect();
+            info.push(Span::styled(
+                format!("{gap}needs {}", names.join(", ")),
+                dim(),
+            ));
+        }
+        info
+    };
+    let gone_info = || vec![Span::styled("· no longer in plan", dim())];
+    let gone = view.gone();
+    let names = tracks.iter().map(|t| t.name.width());
+    let track_width = names
+        .chain(gone.iter().map(|id| id.width()))
+        .max()
+        .unwrap_or(0)
+        .clamp(8, 24)
+        .min(width / 2);
+    let longest_info = tracks
+        .iter()
+        .map(|t| width_of(&info_of(t)))
+        .chain(gone.iter().map(|_| width_of(&gone_info())))
+        .max()
+        .unwrap_or(0);
+    let following = "  ✓ following";
+    let track_row = |marker: &str, name: &str, info: Vec<Span<'static>>, followed: bool| {
+        let tag = if followed { following } else { "" };
+        let room = width.saturating_sub(2 + track_width + 2 + tag.width());
+        let mut spans = vec![
+            Span::raw(format!("{marker} ")),
+            Span::raw(fit(name, track_width)),
+            Span::raw("  "),
+        ];
+        spans.extend(clip(info, room.min(longest_info)));
+        spans.push(Span::styled(tag, Style::new().fg(Color::Green)));
+        Line::from(spans)
+    };
+
+    let mut chosen = None;
+    let mut heading = None;
+    for (i, row) in view.rows().into_iter().enumerate() {
+        let marker = if i == view.selected { "▸" } else { " " };
+        let section = match row {
+            app::PlanRow::Next(_) => "Next",
+            app::PlanRow::Track(_) | app::PlanRow::Gone(_) => "Branch out",
+            _ => "Done",
+        };
+        if heading != Some(section) && section != "Done" {
+            lines.push(rule(section, " ", width));
+        }
+        heading = Some(section);
+        if i == view.selected {
+            chosen = Some(lines.len());
+        }
+        lines.push(match row {
+            app::PlanRow::Next(n) => {
+                skill_row(marker, (n + 1).to_string(), &view.ranking.next[n], false)
+            }
+            app::PlanRow::DoneSkill(n) => {
+                skill_row(marker, String::new(), &view.ranking.done[n], true)
+            }
+            app::PlanRow::Done => rule(
+                &format!("Done ({})", view.ranking.done.len()),
+                marker,
+                width,
+            ),
+            app::PlanRow::Track(n) => track_row(
+                marker,
+                &tracks[n].name,
+                info_of(&tracks[n]),
+                view.followed.contains(&tracks[n].id),
+            ),
+            app::PlanRow::Gone(id) => track_row(marker, &id, gone_info(), true),
+        });
+    }
+    if lines.len() == 1 {
+        lines.push(Line::default());
+        lines.push(Line::styled(" The plan lists no skills.", dim()));
+    }
+    (lines, chosen)
+}
+
+fn plan_screen(f: &mut Frame, area: Rect, view: &app::PlanView) {
+    let [header, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    let (mut lines, chosen) = plan_lines(view, area.width as usize);
+    let rest = lines.split_off(1);
+    f.render_widget(lines.remove(0), header);
+    let Some(chosen) = chosen else {
+        f.render_widget(Paragraph::new(rest).wrap(Wrap { trim: false }), body);
+        return;
+    };
+    let list = List::new(rest).highlight_style(selected());
+    let mut state = ListState::default().with_selected(Some(chosen - 1));
+    f.render_stateful_widget(list, body, &mut state);
+}
+
 // ---- modals ----
 
 const PICKER_ROWS: usize = 8;
@@ -887,6 +1122,110 @@ mod tests {
 
     fn rows(text: &str, width: usize) -> Vec<String> {
         message(text, width).iter().map(|l| l.to_string()).collect()
+    }
+
+    use crate::app::tests::{app_with_plan, press};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::KeyCode;
+
+    /// The section 8.4 example, with neutral facts.
+    const EXAMPLE: &str = r#"{"format":"socratui-plan/1","generated_at":"2026-11-23T13:00:00Z",
+     "summary":"412 sources",
+     "skills":[
+      {"id":"kubernetes","name":"Kubernetes","weight":0.92,"start_level":1,"facts":["38 sources","rising"],"trend":"up","prerequisites":["docker"]},
+      {"id":"terraform","name":"Terraform","weight":0.8,"facts":["29 sources"],"trend":"flat"},
+      {"id":"docker","name":"Docker","weight":0.4,"start_level":1,"facts":["51 sources"]},
+      {"id":"ray","name":"Ray","weight":0.3,"facts":["9 sources"],"trend":"down"},
+      {"id":"mlflow","name":"MLflow","weight":0.3,"facts":["8 sources"]},
+      {"id":"bash","name":"Bash","weight":0.5,"start_level":4},
+      {"id":"git","name":"Git","weight":0.5,"start_level":5},
+      {"id":"linux","name":"Linux","weight":0.5,"start_level":4}],
+     "tracks":[{"id":"ml-platform-engineer","name":"ML platform engineer","facts":["70% overlap"],"skills":["ray","mlflow"]}]}"#;
+
+    fn screen(app: &mut App, width: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    fn plan_view(app: &App) -> &app::PlanView {
+        match &app.screen {
+            Screen::Plan(view) => view,
+            _ => panic!("not on the plan screen"),
+        }
+    }
+
+    #[test]
+    fn plan_rows_fit_60_columns() {
+        let mut app = app_with_plan("ui-plan", Some(EXAMPLE));
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Char('G'));
+        press(&mut app, KeyCode::Enter);
+        for line in plan_lines(plan_view(&app), 60).0 {
+            assert!(line.width() <= 60, "{line}");
+        }
+        let rows = screen(&mut app, 60);
+        let text = rows.join("\n");
+        let k8s = rows
+            .iter()
+            .find(|r| r.contains("Kubernetes") && !r.contains("before"))
+            .expect(&text);
+        assert!(k8s.contains("you 1/4") && k8s.contains('▲'), "{text}");
+        assert!(text.contains("before Kubernetes"), "{text}");
+        assert!(
+            text.contains("Learning plan") && text.contains("412 sources"),
+            "{text}"
+        );
+        assert!(text.contains("needs Ray, MLflow"), "{text}");
+        assert!(text.contains("Done (3)") && text.contains("Git"), "{text}");
+
+        let mut app = app_with_plan("ui-empty", None);
+        press(&mut app, KeyCode::Char('p'));
+        let path = crate::plan::plan_path(
+            &std::env::temp_dir().join(format!("socratui-app-ui-empty-{}", std::process::id())),
+        );
+        let lines: Vec<String> = plan_lines(plan_view(&app), 200)
+            .0
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains(&path.display().to_string()))
+        );
+        assert!(
+            screen(&mut app, 60)
+                .join("")
+                .contains("docs/plan-format.md")
+        );
+    }
+
+    #[test]
+    fn age_of_the_plan() {
+        let now = DateTime::parse_from_rfc3339("2026-11-23T15:00:00Z").unwrap();
+        let age = |at: &str| age(at, now.into());
+        assert_eq!(
+            age("2026-11-23T14:59:30Z").as_deref(),
+            Some("updated just now")
+        );
+        assert_eq!(
+            age("2026-11-23T14:20:00Z").as_deref(),
+            Some("updated 40m ago")
+        );
+        assert_eq!(
+            age("2026-11-23T13:00:00Z").as_deref(),
+            Some("updated 2h ago")
+        );
+        assert_eq!(
+            age("2026-11-20T15:00:00Z").as_deref(),
+            Some("updated 3d ago")
+        );
+        assert_eq!(age("yesterday"), None);
     }
 
     #[test]
