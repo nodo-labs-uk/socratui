@@ -581,15 +581,19 @@ impl App {
         }));
     }
 
-    fn set_plan_enabled(&mut self, enabled: bool) -> Result<()> {
-        plan::save_plan_enabled(&self.data_dir, enabled)?;
-        self.plan_enabled = enabled;
-        self.status = if enabled {
-            "The learning plan is on. Press p on the home screen.".into()
-        } else {
-            "The learning plan is off.".into()
+    /// A failed save is shown in the status line and changes nothing.
+    fn set_plan_enabled(&mut self, enabled: bool) {
+        self.status = match plan::save_plan_enabled(&self.data_dir, enabled) {
+            Err(e) => format!("Could not save settings: {e}"),
+            Ok(()) => {
+                self.plan_enabled = enabled;
+                if enabled {
+                    "The learning plan is on. Press p on the home screen.".into()
+                } else {
+                    "The learning plan is off.".into()
+                }
+            }
         };
-        Ok(())
     }
 
     fn settings_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -600,7 +604,9 @@ impl App {
             match key.code {
                 KeyCode::Esc => settings.editing = None,
                 KeyCode::Enter => {
-                    plan::save_plan_path(&self.data_dir, &input.text())?;
+                    if let Err(e) = plan::save_plan_path(&self.data_dir, &input.text()) {
+                        self.status = format!("Could not save settings: {e}");
+                    }
                     settings.editing = None;
                     settings.plan_file = short_path(&plan::plan_path(&self.data_dir));
                 }
@@ -622,9 +628,9 @@ impl App {
                 settings.row = rows[(i + 1).min(rows.len() - 1)]
             }
             (_, KeyCode::Up | KeyCode::Char('k')) => settings.row = rows[i.saturating_sub(1)],
-            (Plan, KeyCode::Left | KeyCode::Char('h')) => self.set_plan_enabled(false)?,
-            (Plan, KeyCode::Right | KeyCode::Char('l')) => self.set_plan_enabled(true)?,
-            (Plan, KeyCode::Enter) => self.set_plan_enabled(!self.plan_enabled)?,
+            (Plan, KeyCode::Left | KeyCode::Char('h')) => self.set_plan_enabled(false),
+            (Plan, KeyCode::Right | KeyCode::Char('l')) => self.set_plan_enabled(true),
+            (Plan, KeyCode::Enter) => self.set_plan_enabled(!self.plan_enabled),
             (Model, KeyCode::Enter) => self.open_setup(true),
             (PlanFile, KeyCode::Enter) => {
                 let mut input = Input::default();
@@ -1485,7 +1491,7 @@ pub(crate) mod tests {
     }
 
     fn config(app: &App) -> Value {
-        crate::provider::read_config(&app.data_dir.join(CONFIG_FILE))
+        crate::provider::read_config(&app.data_dir.join(CONFIG_FILE)).unwrap()
     }
 
     fn settings(app: &App) -> &Settings {
@@ -1589,6 +1595,54 @@ pub(crate) mod tests {
         press(&mut app, KeyCode::Esc);
         assert!(settings(&app).editing.is_none());
         assert!(config(&app).get("plan_path").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_settings_save_keeps_app_open_and_setting_unchanged() {
+        use std::os::unix::fs::PermissionsExt;
+        let mut app = app_in("save-fails", None, false);
+        let path = app.data_dir.join(CONFIG_FILE);
+        let before = std::fs::read_to_string(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).unwrap();
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('l'));
+        assert!(!app.quit);
+        assert!(!app.plan_enabled);
+        assert!(
+            app.status.starts_with("Could not save settings:"),
+            "{}",
+            app.status
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn unreadable_config_is_not_overwritten() {
+        let mut app = app_with_plan("config-broken", None);
+        let path = app.data_dir.join(CONFIG_FILE);
+        std::fs::write(&path, "{ broken").unwrap();
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('h'));
+        assert!(
+            app.status
+                .contains("config.json could not be read, so it was not changed"),
+            "{}",
+            app.status
+        );
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('x'));
+        press(&mut app, KeyCode::Enter);
+        assert!(app.status.contains("could not be read"), "{}", app.status);
+        assert!(!app.quit);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken");
+        let provider = app.provider.clone().unwrap();
+        assert!(provider.save(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ broken");
     }
 
     #[test]

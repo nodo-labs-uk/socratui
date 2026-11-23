@@ -142,7 +142,7 @@ impl Provider {
 
     /// Writes the provider into the config file and keeps its other settings.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let mut config = read_config(path);
+        let mut config = read_config(path)?;
         config["provider"] = self.kind.id().into();
         config["base_url"] = self.base_url.clone().into();
         config["key"] = self.key.clone().into();
@@ -151,13 +151,17 @@ impl Provider {
     }
 }
 
-/// The settings in the config file, or an empty object.
-pub fn read_config(path: &Path) -> Value {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+/// The settings in the config file, or an empty object when there is none.
+/// A file that exists but cannot be read is an error, so that a save never
+/// replaces it and loses the settings in it.
+pub fn read_config(path: &Path) -> Result<Value> {
+    let text = match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(json!({})),
+        other => other.ok(),
+    };
+    text.and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .filter(Value::is_object)
-        .unwrap_or_else(|| json!({}))
+        .ok_or_else(|| anyhow::anyhow!("config.json could not be read, so it was not changed"))
 }
 
 /// Writes the settings, key included, to a file only the owner can read.

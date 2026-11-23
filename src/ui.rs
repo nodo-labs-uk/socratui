@@ -1174,12 +1174,11 @@ fn draw_modal(f: &mut Frame, app: &App, modal: &Modal) {
             let keys = if settings.editing.is_some() {
                 hints(&[("Enter", "save"), ("Esc", "cancel")])
             } else {
-                hints(&[
-                    ("↑↓", "move"),
-                    ("←→", "off/on"),
-                    ("Enter", "change"),
-                    ("Esc", "close"),
-                ])
+                let mut keys = vec![("↑↓", "move"), ("Enter", "change"), ("Esc", "close")];
+                if settings.row == SettingsRow::Plan {
+                    keys.insert(1, ("←→", "off/on"));
+                }
+                hints(&keys)
             };
             let lines = vec![
                 Line::default(),
@@ -1392,10 +1391,13 @@ mod tests {
             "{text}"
         );
         assert!(!text.contains("Plan file"), "{text}");
+        // The off/on hint shows only on the Learning plan row.
+        assert!(!text.contains("off/on"), "{text}");
         press(&mut app, KeyCode::Char('j'));
         press(&mut app, KeyCode::Char('l'));
         let on = screen(&mut app, 60);
         let text = on.join("\n");
+        assert!(text.contains("off/on"), "{text}");
         assert!(
             text.contains("Plan file") && text.contains("plan.json"),
             "{text}"

@@ -167,16 +167,17 @@ fn config_path(data_dir: &Path) -> PathBuf {
 
 /// Whether the learner turned the plan on in settings. Off when missing.
 pub fn plan_enabled(data_dir: &Path) -> bool {
-    read_config(&config_path(data_dir))["plan_enabled"]
-        .as_bool()
+    read_config(&config_path(data_dir))
+        .ok()
+        .and_then(|v| v["plan_enabled"].as_bool())
         .unwrap_or(false)
 }
 
 /// `plan_path` as written in config.json, if it is set.
 pub fn configured_plan_path(data_dir: &Path) -> Option<String> {
-    read_config(&config_path(data_dir))["plan_path"]
-        .as_str()
-        .map(str::to_string)
+    read_config(&config_path(data_dir))
+        .ok()
+        .and_then(|v| v["plan_path"].as_str().map(str::to_string))
 }
 
 /// The plan file: `plan_path` from config.json (a leading `~` is the home
@@ -194,7 +195,7 @@ pub fn plan_path(data_dir: &Path) -> PathBuf {
 /// Turns the plan on or off and keeps the other settings.
 pub fn save_plan_enabled(data_dir: &Path, enabled: bool) -> anyhow::Result<()> {
     let path = config_path(data_dir);
-    let mut config = read_config(&path);
+    let mut config = read_config(&path)?;
     config["plan_enabled"] = enabled.into();
     write_config(&path, &config)
 }
@@ -202,7 +203,7 @@ pub fn save_plan_enabled(data_dir: &Path, enabled: bool) -> anyhow::Result<()> {
 /// Sets `plan_path`, or removes it when `value` is empty so the default applies.
 pub fn save_plan_path(data_dir: &Path, value: &str) -> anyhow::Result<()> {
     let path = config_path(data_dir);
-    let mut config = read_config(&path);
+    let mut config = read_config(&path)?;
     if let Some(map) = config.as_object_mut() {
         match value.trim() {
             "" => map.remove("plan_path"),
