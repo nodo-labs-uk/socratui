@@ -144,6 +144,7 @@ fn key_hints(app: &App) -> Line<'static> {
                 vec![
                     ("Enter", "send"),
                     ("Alt+Enter", "new line"),
+                    ("Ctrl+D Ctrl+U", "half page"),
                     ("Ctrl+F", "make flashcards"),
                     ("Esc", "normal mode"),
                 ]

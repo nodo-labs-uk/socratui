@@ -1276,6 +1276,8 @@ impl App {
             KeyCode::PageDown => chat.scroll = chat.scroll.saturating_sub(page),
             KeyCode::Up => chat.scroll = chat.scroll.saturating_add(1),
             KeyCode::Down => chat.scroll = chat.scroll.saturating_sub(1),
+            KeyCode::Char('d') if ctrl => chat.scroll = chat.scroll.saturating_sub(half),
+            KeyCode::Char('u') if ctrl => chat.scroll = chat.scroll.saturating_add(half),
             KeyCode::Char('r') if ctrl => {
                 if chat.error.is_some() && !chat.read_only {
                     self.request();
@@ -1315,8 +1317,6 @@ impl App {
             },
             // Normal mode, and every past session.
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('h') => return self.leave_chat(),
-            KeyCode::Char('d') if ctrl => chat.scroll = chat.scroll.saturating_sub(half),
-            KeyCode::Char('u') if ctrl => chat.scroll = chat.scroll.saturating_add(half),
             KeyCode::Char('j') => chat.scroll = chat.scroll.saturating_sub(1),
             KeyCode::Char('k') => chat.scroll = chat.scroll.saturating_add(1),
             KeyCode::Char('G') => chat.scroll = 0,
@@ -1749,6 +1749,23 @@ pub(crate) mod tests {
         press(&mut app, KeyCode::Enter);
         assert!(matches!(app.screen, Screen::Chat(_)));
         assert_eq!(app.db.topics().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ctrl_u_and_d_scroll_while_typing() {
+        let mut app = app_with_plan("scroll", Some(ONE_SKILL));
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('x'));
+        let ctrl = |c| Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        let chat = |app: &App| match &app.screen {
+            Screen::Chat(chat) => (chat.insert, chat.scroll, chat.input.text()),
+            _ => panic!("not in a chat"),
+        };
+        app.on_event(ctrl('u')).unwrap();
+        assert_eq!(chat(&app), (true, 1, "x".to_string()));
+        app.on_event(ctrl('d')).unwrap();
+        assert_eq!(chat(&app), (true, 0, "x".to_string()));
     }
 
     #[test]
