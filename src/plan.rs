@@ -104,7 +104,7 @@ fn skill(v: &Value, i: usize) -> Result<PlanSkill, String> {
         id: text(v, "id", &at)?,
         name: text(v, "name", &at)?,
         weight: weight.clamp(0.0, 1.0),
-        start_level,
+        start_level: start_level.map(|l| l.clamp(0, 5)),
         facts: strings(v, "facts", &at)?,
         trend,
         prerequisites: strings(v, "prerequisites", &at)?,
@@ -349,6 +349,19 @@ mod tests {
         };
         assert_eq!(weights("1.7"), 1.0);
         assert_eq!(weights("-0.2"), 0.0);
+    }
+
+    #[test]
+    fn clamps_start_level() {
+        let levels = |l: &str| {
+            let input = format!(
+                r#"{{"format":"socratui-plan/1","skills":[{{"id":"a","name":"A","weight":0.5,"start_level":{l}}}]}}"#
+            );
+            parse(&input).unwrap().skills[0].start_level
+        };
+        assert_eq!(levels("9"), Some(5));
+        assert_eq!(levels("-2"), Some(0));
+        assert_eq!(levels("3"), Some(3));
     }
 
     fn temp_dir(name: &str) -> PathBuf {

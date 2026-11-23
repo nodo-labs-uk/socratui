@@ -870,13 +870,6 @@ impl App {
         let Some(skill) = plan.skills.iter().find(|s| s.id == skill_id) else {
             return Ok(());
         };
-        if let Some(&topic_id) = self.db.plan_links()?.get(skill_id) {
-            return self.start_chat(topic_id, Mode::Learn, None);
-        }
-        let topic_id = self
-            .db
-            .create_topic(&skill.name, plan::DEFAULT_TARGET, now())?;
-        self.db.link_plan_skill(skill_id, topic_id)?;
         let mut hint = String::new();
         if let Some(level) = skill.start_level {
             hint += &format!(
@@ -892,8 +885,16 @@ impl App {
                 .collect();
             hint += &format!("It builds on: {}. ", names.join(", "));
         }
+        let hint = Some(hint).filter(|h| !h.is_empty());
+        if let Some(&topic_id) = self.db.plan_links()?.get(skill_id) {
+            return self.start_chat(topic_id, Mode::Learn, hint);
+        }
+        let topic_id = self
+            .db
+            .create_topic(&skill.name, plan::DEFAULT_TARGET, now())?;
+        self.db.link_plan_skill(skill_id, topic_id)?;
         self.refresh_home()?;
-        self.start_chat(topic_id, Mode::Learn, Some(hint).filter(|h| !h.is_empty()))
+        self.start_chat(topic_id, Mode::Learn, hint)
     }
 
     fn history_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -1482,6 +1483,8 @@ pub(crate) mod tests {
     fn reloads_when_the_file_changes() {
         let mut app = app_with_plan("reload", Some(ONE_SKILL));
         press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Char('G'));
+        assert_eq!(plan_view(&app).selected, 1);
         let path = crate::plan::plan_path(&app.data_dir);
         let newer =
             r#"{"format":"socratui-plan/1","skills":[{"id":"rust","name":"Rust","weight":0.5}]}"#;
@@ -1493,9 +1496,23 @@ pub(crate) mod tests {
             .unwrap()
             .set_modified(later)
             .unwrap();
-        press(&mut app, KeyCode::Char('q'));
-        press(&mut app, KeyCode::Char('p'));
+        app.poll_stream().unwrap();
         let view = plan_view(&app);
         assert_eq!(view.ranking.next[0].name, "Rust");
+        assert!(view.selected < view.rows().len());
+    }
+
+    #[test]
+    fn retry_keeps_the_hint_while_the_topic_has_no_subskills() {
+        let mut app = app_with_plan("retry-hint", Some(ONE_SKILL));
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('q'));
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Enter);
+        let text = opening(&app);
+        assert!(text.contains("Starting level estimate: 1 of 4."), "{text}");
+        assert!(text.contains("It builds on: Docker."), "{text}");
     }
 }

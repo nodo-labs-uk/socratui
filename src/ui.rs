@@ -732,7 +732,7 @@ fn plan_lines(view: &app::PlanView, width: usize) -> (Vec<Line<'static>>, Option
     };
     let width_of = |spans: &[Span]| spans.iter().map(Span::width).sum::<usize>();
 
-    // Columns: marker and rank (5), name, bar (1 + 7), facts (2 + F), you (1 + 9).
+    // Columns: marker and rank (6), name, bar (1 + 7), facts (2 + F), you (1 + 9).
     // The facts column is as wide as the longest facts, so that on a wide
     // terminal the level stays next to them.
     let facts_of = |r: &crate::plan::RankedSkill| {
@@ -747,12 +747,12 @@ fn plan_lines(view: &app::PlanView, width: usize) -> (Vec<Line<'static>>, Option
     let ranked: Vec<_> = view.ranking.next.iter().chain(&view.ranking.done).collect();
     let longest = ranked.iter().map(|r| r.name.width()).max().unwrap_or(0);
     let mut name_width = longest.clamp(6, 20);
-    if width.saturating_sub(25 + name_width) < 10 {
-        name_width = width.saturating_sub(35).max(6);
+    if width.saturating_sub(26 + name_width) < 10 {
+        name_width = width.saturating_sub(36).max(6);
     }
     let longest_facts = ranked.iter().map(|r| width_of(&facts_of(r))).max();
     let facts_width = width
-        .saturating_sub(25 + name_width)
+        .saturating_sub(26 + name_width)
         .min(longest_facts.unwrap_or(0));
     let skill_row = |marker: &str, rank: String, r: &crate::plan::RankedSkill, done: bool| {
         let (arrow, arrow_colour) = match r.trend {
@@ -761,7 +761,7 @@ fn plan_lines(view: &app::PlanView, width: usize) -> (Vec<Line<'static>>, Option
             _ => (" ", Color::Reset),
         };
         let mut spans = vec![
-            Span::raw(format!("{marker}{rank:>2}  ")),
+            Span::raw(format!("{marker}{rank:>3}  ")),
             Span::raw(fit(&r.name, name_width)),
             Span::styled(
                 format!(" {}  ", bar((r.weight * 7.0).round() as usize, 7)),
@@ -771,7 +771,7 @@ fn plan_lines(view: &app::PlanView, width: usize) -> (Vec<Line<'static>>, Option
         spans.extend(clip(facts_of(r), facts_width));
         spans.push(Span::raw(format!(
             " {:>7} ",
-            format!("you {:.0}/{}", r.level, r.target)
+            format!("you {}/{}", r.level.floor(), r.target)
         )));
         spans.push(Span::styled(arrow, Style::new().fg(arrow_colour)));
         Line::from(spans)
@@ -1203,6 +1203,45 @@ mod tests {
                 .join("")
                 .contains("docs/plan-format.md")
         );
+    }
+
+    #[test]
+    fn plan_rows_fit_60_columns_with_three_digit_ranks() {
+        let skills: Vec<String> = (0..101)
+            .map(|i| {
+                format!(r#"{{"id":"s{i}","name":"Skill number {i}","weight":0.5,"facts":["12 sources","rising"],"trend":"up"}}"#)
+            })
+            .collect();
+        let plan = format!(
+            r#"{{"format":"socratui-plan/1","skills":[{}]}}"#,
+            skills.join(",")
+        );
+        let mut app = app_with_plan("ui-wide-rank", Some(&plan));
+        press(&mut app, KeyCode::Char('p'));
+        let lines = plan_lines(plan_view(&app), 60).0;
+        assert!(lines.iter().any(|l| l.to_string().contains("101")));
+        for line in lines {
+            assert!(line.width() <= 60, "{line}");
+        }
+    }
+
+    #[test]
+    fn level_is_floored_for_display() {
+        let plan =
+            r#"{"format":"socratui-plan/1","skills":[{"id":"a","name":"Alpha","weight":0.5}]}"#;
+        let mut app = app_with_plan("ui-floor", Some(plan));
+        let topic = app.db.create_topic("Alpha", 4, 0).unwrap();
+        app.db.link_plan_skill("a", topic).unwrap();
+        let names: Vec<String> = (0..5).map(|i| format!("s{i}")).collect();
+        app.db.add_subskills(topic, &names).unwrap();
+        for (i, sub) in app.db.subskills(topic).unwrap().iter().enumerate() {
+            app.db
+                .set_level(sub, if i < 3 { 4 } else { 3 }, "t", 0)
+                .unwrap();
+        }
+        press(&mut app, KeyCode::Char('p'));
+        let text = screen(&mut app, 80).join("\n");
+        assert!(text.contains("you 3/4"), "{text}");
     }
 
     #[test]

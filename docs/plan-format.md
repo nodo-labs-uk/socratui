@@ -59,7 +59,8 @@ Each skill:
 - `id` (required): a stable key, such as `kubernetes`.
 - `name` (required): the name to show.
 - `weight` (required): how much the skill matters, from 0 to 1. Values outside that range are cut to 0 or 1.
-- `start_level`: the level, 0 to 5, to start from if you have no history for the skill.
+- `start_level`: the level, 0 to 5, to start from if you have no history for the skill. Values outside that range are cut to 0 or 5.
+  If the learner already has a topic with the same name made by hand, starting the skill from the plan creates a separate topic.
 - `facts`: short notes to show beside the skill.
 - `trend`: `up`, `down` or `flat`.
 - `prerequisites`: ids of skills to learn first.
