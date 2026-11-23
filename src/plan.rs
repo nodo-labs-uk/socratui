@@ -2,6 +2,7 @@
 //! `socratui-plan/1` format (see docs/plan-format.md).
 
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub const FORMAT: &str = "socratui-plan/1";
@@ -165,6 +166,109 @@ pub fn plan_path(data_dir: &Path) -> PathBuf {
     }
 }
 
+const DEFAULT_TARGET: i64 = 4;
+const PREREQUISITE_BELOW: f64 = 2.0;
+const FOLLOWED_BOOST: f64 = 1.5;
+
+/// Measured progress on a skill, from a linked topic.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Progress {
+    pub level: f64,
+    pub target: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RankedSkill {
+    pub id: String,
+    pub name: String,
+    pub weight: f64,
+    pub facts: Vec<String>,
+    pub trend: Option<Trend>,
+    pub level: f64,
+    pub target: i64,
+    pub priority: f64,
+    /// Name of the skill this one unlocks, if it was lifted for that reason.
+    pub before: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ranking {
+    pub next: Vec<RankedSkill>,
+    pub done: Vec<RankedSkill>,
+}
+
+/// Orders the plan's skills by weight and the gap to the target level.
+/// `progress` is keyed by skill id; `followed` holds the followed track ids.
+pub fn rank(
+    plan: &Plan,
+    progress: &HashMap<String, Progress>,
+    followed: &HashSet<String>,
+) -> Ranking {
+    let in_followed: HashSet<&str> = plan
+        .tracks
+        .iter()
+        .filter(|t| followed.contains(&t.id))
+        .flat_map(|t| t.skills.iter().map(String::as_str))
+        .collect();
+    let mut ranked: Vec<RankedSkill> = plan
+        .skills
+        .iter()
+        .map(|s| {
+            let measured = progress.get(&s.id);
+            let level = measured.map_or_else(|| s.start_level.unwrap_or(0) as f64, |p| p.level);
+            let target = measured.map_or(DEFAULT_TARGET, |p| p.target);
+            let gap = if target > 0 {
+                1.0 - level / target as f64
+            } else {
+                0.0
+            };
+            let boost = if in_followed.contains(s.id.as_str()) {
+                FOLLOWED_BOOST
+            } else {
+                1.0
+            };
+            RankedSkill {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                weight: s.weight,
+                facts: s.facts.clone(),
+                trend: s.trend,
+                level,
+                target,
+                priority: (s.weight * gap).max(0.0) * boost,
+                before: None,
+            }
+        })
+        .collect();
+
+    let base: Vec<f64> = ranked.iter().map(|r| r.priority).collect();
+    for (dependent, skill) in plan.skills.iter().enumerate() {
+        for id in &skill.prerequisites {
+            let Some(p) = ranked.iter().position(|r| &r.id == id) else {
+                continue;
+            };
+            let low =
+                ranked[p].level < PREREQUISITE_BELOW && ranked[p].level < ranked[p].target as f64;
+            let lifted = ranked[p].before.is_some();
+            let current = if lifted { ranked[p].priority } else { base[p] };
+            if low && base[dependent] > current {
+                ranked[p].priority = base[dependent];
+                ranked[p].before = Some(skill.name.clone());
+            }
+        }
+    }
+
+    let (done, mut next): (Vec<_>, Vec<_>) =
+        ranked.into_iter().partition(|r| r.level >= r.target as f64);
+    next.sort_by(|a, b| {
+        b.priority
+            .total_cmp(&a.priority)
+            .then(b.before.is_some().cmp(&a.before.is_some()))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ranking { next, done }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +364,125 @@ mod tests {
         std::fs::write(&config, r#"{"plan_path":"/abs/p.json"}"#).unwrap();
         assert_eq!(plan_path(&dir), PathBuf::from("/abs/p.json"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn ps(id: &str, weight: f64, start: Option<i64>, prereqs: &[&str]) -> PlanSkill {
+        PlanSkill {
+            id: id.into(),
+            name: id.to_uppercase(),
+            weight,
+            start_level: start,
+            facts: vec![],
+            trend: None,
+            prerequisites: prereqs.iter().map(|s| s.to_string()).collect(),
+            related: vec![],
+            former_ids: vec![],
+        }
+    }
+
+    fn plan_of(skills: Vec<PlanSkill>, tracks: Vec<Track>) -> Plan {
+        Plan {
+            generated_at: String::new(),
+            source: String::new(),
+            summary: String::new(),
+            skills,
+            tracks,
+        }
+    }
+
+    fn none() -> (HashMap<String, Progress>, HashSet<String>) {
+        (HashMap::new(), HashSet::new())
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
+    #[test]
+    fn weight_times_gap() {
+        let (mut prog, fol) = none();
+        let p = plan_of(vec![ps("a", 0.8, None, &[])], vec![]);
+        assert!(close(rank(&p, &prog, &fol).next[0].priority, 0.8));
+        let p2 = plan_of(vec![ps("a", 0.8, Some(2), &[])], vec![]);
+        assert!(close(rank(&p2, &prog, &fol).next[0].priority, 0.4));
+        prog.insert(
+            "a".into(),
+            Progress {
+                level: 3.0,
+                target: 4,
+            },
+        );
+        assert!(close(rank(&p2, &prog, &fol).next[0].priority, 0.2));
+    }
+
+    #[test]
+    fn reached_target_is_done() {
+        let (mut prog, fol) = none();
+        prog.insert(
+            "a".into(),
+            Progress {
+                level: 4.0,
+                target: 4,
+            },
+        );
+        let r = rank(&plan_of(vec![ps("a", 0.8, None, &[])], vec![]), &prog, &fol);
+        assert!(r.next.is_empty());
+        assert_eq!(r.done[0].id, "a");
+    }
+
+    #[test]
+    fn prerequisite_first() {
+        let (mut prog, fol) = none();
+        let p = plan_of(
+            vec![
+                ps("kubernetes", 0.9, Some(1), &["docker"]),
+                ps("docker", 0.2, None, &[]),
+            ],
+            vec![],
+        );
+        let r = rank(&p, &prog, &fol);
+        assert_eq!(r.next[0].id, "docker");
+        assert_eq!(r.next[0].before.as_deref(), Some("KUBERNETES"));
+        assert_eq!(r.next[1].id, "kubernetes");
+        prog.insert(
+            "docker".into(),
+            Progress {
+                level: 2.0,
+                target: 4,
+            },
+        );
+        let r = rank(&p, &prog, &fol);
+        assert_eq!(r.next[0].id, "kubernetes");
+        assert!(r.next.iter().all(|s| s.before.is_none()));
+    }
+
+    #[test]
+    fn followed_track_boost() {
+        let (prog, mut fol) = none();
+        let track = Track {
+            id: "t".into(),
+            name: "T".into(),
+            facts: vec![],
+            why: String::new(),
+            skills: vec!["b".into()],
+        };
+        let p = plan_of(
+            vec![ps("a", 0.5, None, &[]), ps("b", 0.5, None, &[])],
+            vec![track],
+        );
+        fol.insert("t".into());
+        let r = rank(&p, &prog, &fol);
+        assert_eq!(r.next[0].id, "b");
+        assert!(close(r.next[0].priority, 0.75));
+        assert!(close(r.next[1].priority, 0.5));
+    }
+
+    #[test]
+    fn missing_prerequisite_id_is_ignored() {
+        let (prog, fol) = none();
+        let p = plan_of(vec![ps("a", 0.5, None, &["ghost"])], vec![]);
+        let r = rank(&p, &prog, &fol);
+        assert_eq!(r.next.len(), 1);
+        assert!(close(r.next[0].priority, 0.5));
     }
 }
