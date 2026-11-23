@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/nodo-labs-uk/socratui/schema/plan-v1.json",
+  "title": "socratui learning plan, format socratui-plan/1",
+  "type": "object",
+  "required": ["format", "skills"],
+  "properties": {
+    "format": { "const": "socratui-plan/1" },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "source": { "type": "string" },
+    "summary": { "type": "string" },
+    "skills": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name", "weight"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "weight": { "type": "number", "minimum": 0, "maximum": 1 },
+          "start_level": { "type": "integer", "minimum": 0, "maximum": 5 },
+          "facts": { "type": "array", "items": { "type": "string" } },
+          "trend": { "enum": ["up", "down", "flat"] },
+          "prerequisites": { "type": "array", "items": { "type": "string" } },
+          "related": { "type": "array", "items": { "type": "string" } },
+          "former_ids": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": true
+      }
+    },
+    "tracks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "name"],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "facts": { "type": "array", "items": { "type": "string" } },
+          "why": { "type": "string" },
+          "skills": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

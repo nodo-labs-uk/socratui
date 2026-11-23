@@ -4,6 +4,7 @@ use crate::srs::{self, DAY, Grade, Sched};
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 /// A failed card comes back after ten minutes; a failed concept the next day.
@@ -73,6 +74,14 @@ CREATE TABLE IF NOT EXISTS card_reviews(
     card_id INTEGER NOT NULL REFERENCES cards(id) ON DELETE CASCADE,
     grade TEXT NOT NULL,
     at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS plan_links(
+    skill_id TEXT PRIMARY KEY,
+    topic_id INTEGER NOT NULL UNIQUE REFERENCES topics(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS followed_tracks(
+    track_id TEXT PRIMARY KEY,
+    followed_at INTEGER NOT NULL
 );
 ";
 
@@ -514,6 +523,57 @@ impl Db {
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
+
+    // ---- plan ----
+
+    pub fn link_plan_skill(&self, skill_id: &str, topic_id: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO plan_links(skill_id, topic_id) VALUES (?1, ?2)",
+            params![skill_id, topic_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn plan_links(&self) -> Result<HashMap<String, i64>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT skill_id, topic_id FROM plan_links")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Moves a link to the id that replaced `old_id`. Returns false and changes
+    /// nothing when `old_id` has no link or `new_id` is already linked.
+    pub fn relink_plan_skill(&self, old_id: &str, new_id: &str) -> Result<bool> {
+        let changed = self.conn.execute(
+            "UPDATE plan_links SET skill_id = ?2 WHERE skill_id = ?1
+             AND NOT EXISTS (SELECT 1 FROM plan_links WHERE skill_id = ?2)",
+            params![old_id, new_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn follow_track(&self, track_id: &str, now: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO followed_tracks(track_id, followed_at) VALUES (?1, ?2)",
+            params![track_id, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn unfollow_track(&self, track_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM followed_tracks WHERE track_id = ?1",
+            [track_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn followed_tracks(&self) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare("SELECT track_id FROM followed_tracks")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
 }
 
 #[cfg(test)]
@@ -610,5 +670,47 @@ mod tests {
         db.delete_topic(t).unwrap();
         assert!(db.sessions().unwrap().is_empty());
         assert!(db.messages(s).unwrap().is_empty());
+    }
+
+    #[test]
+    fn links_a_skill_to_a_topic() {
+        let (db, t) = setup();
+        db.link_plan_skill("kubernetes", t).unwrap();
+        assert_eq!(db.plan_links().unwrap().get("kubernetes"), Some(&t));
+    }
+
+    #[test]
+    fn deleting_the_topic_drops_the_link() {
+        let (db, t) = setup();
+        db.link_plan_skill("kubernetes", t).unwrap();
+        db.delete_topic(t).unwrap();
+        assert!(db.plan_links().unwrap().is_empty());
+    }
+
+    #[test]
+    fn relinks_a_merged_id() {
+        let (db, t) = setup();
+        db.link_plan_skill("k8s", t).unwrap();
+        assert!(db.relink_plan_skill("k8s", "kubernetes").unwrap());
+        let links = db.plan_links().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links.get("kubernetes"), Some(&t));
+
+        let t2 = db.create_topic("Other", 4, 1000).unwrap();
+        db.link_plan_skill("k8s", t2).unwrap();
+        assert!(!db.relink_plan_skill("k8s", "kubernetes").unwrap());
+        let links = db.plan_links().unwrap();
+        assert_eq!(links.get("kubernetes"), Some(&t));
+        assert_eq!(links.get("k8s"), Some(&t2));
+    }
+
+    #[test]
+    fn follows_and_unfollows_tracks() {
+        let (db, _) = setup();
+        db.follow_track("platform", 1000).unwrap();
+        db.follow_track("platform", 2000).unwrap();
+        assert_eq!(db.followed_tracks().unwrap().len(), 1);
+        db.unfollow_track("platform").unwrap();
+        assert!(db.followed_tracks().unwrap().is_empty());
     }
 }

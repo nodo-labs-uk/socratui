@@ -4,6 +4,7 @@ mod db;
 mod diagram;
 mod export;
 mod input;
+mod plan;
 mod provider;
 mod srs;
 mod tutor;

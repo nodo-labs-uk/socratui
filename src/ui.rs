@@ -1,12 +1,14 @@
 //! Drawing. Reads the app state; the only thing it writes back is the clamped
 //! transcript scroll position.
 
-use crate::app::{self, App, CardReview, Chat, Item, Modal, Screen, SetupStep, TopicRow};
+use crate::app::{
+    self, App, CardReview, Chat, Item, Modal, Screen, SettingsRow, SetupStep, TopicRow,
+};
 use crate::db::Subskill;
 use crate::provider::Kind;
 use crate::srs::{self, Grade};
 use crate::tutor::{LEVEL_NAMES, Mode};
-use chrono::{DateTime, Local};
+use chrono::{DateTime, Local, Utc};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -47,6 +49,22 @@ fn fit(text: &str, width: usize) -> String {
     }
     out.push('…');
     format!("{out}{}", " ".repeat(width.saturating_sub(out.width())))
+}
+
+/// Like `fit`, but cuts from the start, so the end of a path stays visible.
+fn fit_start(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return fit(text, width);
+    }
+    let mut out: Vec<char> = Vec::new();
+    for c in text.chars().rev() {
+        if out.iter().collect::<String>().width() + 2 > width {
+            break;
+        }
+        out.push(c);
+    }
+    let kept: String = out.into_iter().rev().collect();
+    fit(&format!("…{kept}"), width)
 }
 
 fn bar(filled: usize, width: usize) -> String {
@@ -97,18 +115,24 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 
 fn key_hints(app: &App) -> Line<'static> {
     match &app.screen {
-        Screen::Home => hints(&[
-            ("Enter", "learn"),
-            ("n", "new topic"),
-            ("r", "review concepts"),
-            ("f", "flashcards"),
-            ("H", "history"),
-            ("m", "model"),
-            ("e", "export to Anki"),
-            ("s", "settings"),
-            ("dd", "delete"),
-            ("q", "quit"),
-        ]),
+        Screen::Home => {
+            let mut keys = vec![
+                ("Enter", "learn"),
+                ("n", "new topic"),
+                ("r", "review concepts"),
+                ("f", "flashcards"),
+                ("H", "history"),
+                ("m", "model"),
+                ("e", "export to Anki"),
+                ("s", "settings"),
+                ("dd", "delete"),
+                ("q", "quit"),
+            ];
+            if app.plan_enabled {
+                keys.insert(2, ("p", "plan"));
+            }
+            hints(&keys)
+        }
         Screen::Chat(chat) if chat.read_only => hints(&[
             ("j k", "scroll"),
             ("Ctrl+D Ctrl+U", "half page"),
@@ -120,6 +144,7 @@ fn key_hints(app: &App) -> Line<'static> {
                 vec![
                     ("Enter", "send"),
                     ("Alt+Enter", "new line"),
+                    ("Ctrl+D Ctrl+U", "half page"),
                     ("Ctrl+F", "make flashcards"),
                     ("Esc", "normal mode"),
                 ]
@@ -152,6 +177,12 @@ fn key_hints(app: &App) -> Line<'static> {
             ("q", "back"),
         ]),
         Screen::History => hints(&[("j k", "move"), ("Enter", "open"), ("q", "back")]),
+        Screen::Plan(_) => hints(&[
+            ("Enter", "start/continue"),
+            ("b", "follow"),
+            ("Tab", "topics"),
+            ("q", "back"),
+        ]),
     }
 }
 
@@ -203,6 +234,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Screen::Chat(chat) => draw_chat(f, body, chat),
         Screen::Cards(review) => cards(f, body, review),
         Screen::History => history(f, body, app),
+        Screen::Plan(view) => plan_screen(f, body, view),
     }
     f.render_widget(
         Line::styled(format!(" {}", app.status), Style::new().fg(Color::Yellow)),
@@ -211,7 +243,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     f.render_widget(Paragraph::new(keys).wrap(Wrap { trim: true }), footer);
 
     if let Some(modal) = &app.modal {
-        draw_modal(f, modal);
+        draw_modal(f, app, modal);
     }
 }
 
@@ -642,20 +674,250 @@ fn history(f: &mut Frame, area: Rect, app: &App) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
+// ---- learning plan ----
+
+/// How long ago an RFC 3339 time was, as "updated 2h ago".
+fn age(at: &str, now: DateTime<Utc>) -> Option<String> {
+    let then = DateTime::parse_from_rfc3339(at).ok()?;
+    let minutes = (now - then.with_timezone(&Utc)).num_minutes();
+    Some(match minutes {
+        m if m < 1 => "updated just now".to_string(),
+        m if m < 60 => format!("updated {m}m ago"),
+        m if m < 48 * 60 => format!("updated {}h ago", m / 60),
+        m => format!("updated {}d ago", m / (24 * 60)),
+    })
+}
+
+/// Cuts a row of spans to `width` columns, ending in "…" if it is too long,
+/// and pads it to exactly `width`.
+fn clip(spans: Vec<Span<'static>>, width: usize) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut room = width;
+    for span in spans {
+        if room == 0 {
+            break;
+        }
+        if span.width() <= room {
+            room -= span.width();
+            out.push(span);
+        } else {
+            out.push(Span::styled(fit(&span.content, room), span.style));
+            room = 0;
+        }
+    }
+    out.push(Span::raw(" ".repeat(room)));
+    out
+}
+
+/// A section heading: ` ─ Next ────`.
+fn rule(title: &str, marker: &str, width: usize) -> Line<'static> {
+    let head = format!("{marker}─ {title} ");
+    let rest = width.saturating_sub(head.width());
+    Line::styled(format!("{head}{}", "─".repeat(rest)), dim())
+}
+
+/// The plan screen's header, then one line per row and heading. The second
+/// value is the index of the selected line.
+fn plan_lines(view: &app::PlanView, width: usize) -> (Vec<Line<'static>>, Option<usize>) {
+    let title = " Learning plan";
+    let mut about = Vec::new();
+    let tracks = view.tracks();
+    let plan = match &view.state {
+        app::PlanState::Loaded(plan) => {
+            about.extend(Some(plan.summary.clone()).filter(|s| !s.is_empty()));
+            about.extend(age(&plan.generated_at, Utc::now()));
+            Some(plan)
+        }
+        _ => None,
+    };
+    let about = fit(&about.join(" · "), width.saturating_sub(title.width() + 2))
+        .trim_end()
+        .to_string();
+    let mut lines = vec![Line::from(vec![
+        Span::styled(title, bold().fg(ACCENT)),
+        Span::raw(" ".repeat(width.saturating_sub(title.width() + about.width()))),
+        Span::styled(about, dim()),
+    ])];
+    let Some(plan) = plan else {
+        lines.push(Line::default());
+        match &view.state {
+            app::PlanState::Missing(path) => lines.extend([
+                Line::from(" No learning plan yet. Put a plan file here:"),
+                Line::from(format!(" {}", app::short_path(path))),
+                Line::styled(" The format is in docs/plan-format.md.", dim()),
+            ]),
+            app::PlanState::Broken(error) => lines.push(Line::styled(
+                format!(" Could not read the plan file: {error}"),
+                Style::new().fg(Color::Red),
+            )),
+            app::PlanState::Loaded(_) => {}
+        }
+        return (lines, None);
+    };
+    let width_of = |spans: &[Span]| spans.iter().map(Span::width).sum::<usize>();
+
+    // Columns: marker and rank (6), name, bar (1 + 7), facts (2 + F), you (1 + 9).
+    // The facts column is as wide as the longest facts, so that on a wide
+    // terminal the level stays next to them.
+    let facts_of = |r: &crate::plan::RankedSkill| {
+        let mut facts = Vec::new();
+        if let Some(before) = &r.before {
+            let sep = if r.facts.is_empty() { "" } else { " · " };
+            facts.push(Span::styled(format!("before {before}{sep}"), dim()));
+        }
+        facts.push(Span::raw(r.facts.join(" · ")));
+        facts
+    };
+    let ranked: Vec<_> = view.ranking.next.iter().chain(&view.ranking.done).collect();
+    let longest = ranked.iter().map(|r| r.name.width()).max().unwrap_or(0);
+    let mut name_width = longest.clamp(6, 20);
+    if width.saturating_sub(26 + name_width) < 10 {
+        name_width = width.saturating_sub(36).max(6);
+    }
+    let longest_facts = ranked.iter().map(|r| width_of(&facts_of(r))).max();
+    let facts_width = width
+        .saturating_sub(26 + name_width)
+        .min(longest_facts.unwrap_or(0));
+    let skill_row = |marker: &str, rank: String, r: &crate::plan::RankedSkill, done: bool| {
+        let (arrow, arrow_colour) = match r.trend {
+            Some(crate::plan::Trend::Up) => ("▲", Color::Green),
+            Some(crate::plan::Trend::Down) => ("▼", Color::Red),
+            _ => (" ", Color::Reset),
+        };
+        let mut spans = vec![
+            Span::raw(format!("{marker}{rank:>3}  ")),
+            Span::raw(fit(&r.name, name_width)),
+            Span::styled(
+                format!(" {}  ", bar((r.weight * 7.0).round() as usize, 7)),
+                Style::new().fg(if done { Color::Green } else { ACCENT }),
+            ),
+        ];
+        spans.extend(clip(facts_of(r), facts_width));
+        spans.push(Span::raw(format!(
+            " {:>7} ",
+            format!("you {}/{}", r.level.floor(), r.target)
+        )));
+        spans.push(Span::styled(arrow, Style::new().fg(arrow_colour)));
+        Line::from(spans)
+    };
+
+    // Track rows: marker (2), name, info (2 + I), then "✓ following".
+    let info_of = |t: &crate::plan::Track| {
+        let mut info = vec![Span::raw(t.facts.join(" · "))];
+        if !t.skills.is_empty() {
+            let gap = if t.facts.is_empty() { "" } else { "  " };
+            let names: Vec<&str> = t.skills.iter().take(3).map(|id| plan.name_of(id)).collect();
+            info.push(Span::styled(
+                format!("{gap}needs {}", names.join(", ")),
+                dim(),
+            ));
+        }
+        info
+    };
+    let gone_info = || vec![Span::styled("· no longer in plan", dim())];
+    let gone = view.gone();
+    let names = tracks.iter().map(|t| t.name.width());
+    let track_width = names
+        .chain(gone.iter().map(|id| id.width()))
+        .max()
+        .unwrap_or(0)
+        .clamp(8, 24)
+        .min(width / 2);
+    let longest_info = tracks
+        .iter()
+        .map(|t| width_of(&info_of(t)))
+        .chain(gone.iter().map(|_| width_of(&gone_info())))
+        .max()
+        .unwrap_or(0);
+    let following = "  ✓ following";
+    let track_row = |marker: &str, name: &str, info: Vec<Span<'static>>, followed: bool| {
+        let tag = if followed { following } else { "" };
+        let room = width.saturating_sub(2 + track_width + 2 + tag.width());
+        let mut spans = vec![
+            Span::raw(format!("{marker} ")),
+            Span::raw(fit(name, track_width)),
+            Span::raw("  "),
+        ];
+        spans.extend(clip(info, room.min(longest_info)));
+        spans.push(Span::styled(tag, Style::new().fg(Color::Green)));
+        Line::from(spans)
+    };
+
+    let mut chosen = None;
+    let mut heading = None;
+    for (i, row) in view.rows().into_iter().enumerate() {
+        let marker = if i == view.selected { "▸" } else { " " };
+        let section = match row {
+            app::PlanRow::Next(_) => "Next",
+            app::PlanRow::Track(_) | app::PlanRow::Gone(_) => "Branch out",
+            _ => "Done",
+        };
+        if heading != Some(section) && section != "Done" {
+            lines.push(rule(section, " ", width));
+        }
+        heading = Some(section);
+        if i == view.selected {
+            chosen = Some(lines.len());
+        }
+        lines.push(match row {
+            app::PlanRow::Next(n) => {
+                skill_row(marker, (n + 1).to_string(), &view.ranking.next[n], false)
+            }
+            app::PlanRow::DoneSkill(n) => {
+                skill_row(marker, String::new(), &view.ranking.done[n], true)
+            }
+            app::PlanRow::Done => rule(
+                &format!("Done ({})", view.ranking.done.len()),
+                marker,
+                width,
+            ),
+            app::PlanRow::Track(n) => track_row(
+                marker,
+                &tracks[n].name,
+                info_of(&tracks[n]),
+                view.followed.contains(&tracks[n].id),
+            ),
+            app::PlanRow::Gone(id) => track_row(marker, &id, gone_info(), true),
+        });
+    }
+    if lines.len() == 1 {
+        lines.push(Line::default());
+        lines.push(Line::styled(" The plan lists no skills.", dim()));
+    }
+    (lines, chosen)
+}
+
+fn plan_screen(f: &mut Frame, area: Rect, view: &app::PlanView) {
+    let [header, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    let (mut lines, chosen) = plan_lines(view, area.width as usize);
+    let rest = lines.split_off(1);
+    f.render_widget(lines.remove(0), header);
+    let Some(chosen) = chosen else {
+        f.render_widget(Paragraph::new(rest).wrap(Wrap { trim: false }), body);
+        return;
+    };
+    let list = List::new(rest).highlight_style(selected());
+    let mut state = ListState::default().with_selected(Some(chosen - 1));
+    f.render_stateful_widget(list, body, &mut state);
+}
+
 // ---- modals ----
 
 const PICKER_ROWS: usize = 8;
 
-fn draw_modal(f: &mut Frame, modal: &Modal) {
+fn draw_modal(f: &mut Frame, app: &App, modal: &Modal) {
     let screen = f.area();
-    // The picker keeps one size, whatever the filter leaves in its list.
+    // The picker keeps one size, whatever the filter leaves in its list, and
+    // settings keep one size whether the plan file row shows or not.
     let height = match modal {
         Modal::Model(_) => PICKER_ROWS as u16 + 7,
+        Modal::Settings(_) => 10,
         _ => 8,
     };
     // The provider buttons need 76 columns once there are five of them.
     let width = match modal {
         Modal::Setup(_) => 76,
+        Modal::Settings(_) => 60,
         _ => 64,
     };
     let (width, height) = (screen.width.min(width), height.min(screen.height));
@@ -865,6 +1127,87 @@ fn draw_modal(f: &mut Frame, modal: &Modal) {
             f.render_widget(Paragraph::new(lines).block(block), area);
             f.set_cursor_position((area.x + 2 + column as u16, area.y + 2));
         }
+        Modal::Settings(settings) => {
+            const LABEL: usize = 15;
+            let value_width = inner.saturating_sub(2 + LABEL);
+            let row = |which: SettingsRow, label: &str, value: Vec<Span<'static>>| {
+                let chosen = settings.row == which;
+                let mut spans = vec![Span::raw(if chosen { "▸ " } else { "  " })];
+                spans.push(Span::styled(
+                    fit(label, LABEL),
+                    if chosen { bold() } else { dim() },
+                ));
+                spans.extend(value);
+                let line = Line::from(clip(spans, inner));
+                if chosen { line.style(selected()) } else { line }
+            };
+            let model = app.provider.as_ref().map_or("not set".to_string(), |p| {
+                format!("{} · {}", p.kind.label(), p.model)
+            });
+            let button = |label: &str, on: bool| {
+                let style = if on {
+                    bold().fg(Color::Black).bg(ACCENT)
+                } else {
+                    dim()
+                };
+                Span::styled(format!(" {label} "), style)
+            };
+            let plan = vec![
+                button("Off", !app.plan_enabled),
+                Span::raw(" "),
+                button("On", app.plan_enabled),
+            ];
+            let mut cursor = None;
+            let file = match &settings.editing {
+                Some(input) => {
+                    let (rows, at) = input.layout(value_width);
+                    cursor = Some(at.0);
+                    vec![Span::raw(rows[at.1].clone())]
+                }
+                None => vec![Span::raw(fit_start(&settings.plan_file, value_width))],
+            };
+            let note = match (settings.row, &settings.editing) {
+                (_, Some(_)) => "Leave empty to use the default file.",
+                (SettingsRow::Model, _) => "Enter changes the provider, key or model.",
+                (SettingsRow::Plan, _) => "Ranks the skills in a plan file. p on Home opens it.",
+                (SettingsRow::PlanFile, _) => "The format is in docs/plan-format.md.",
+            };
+            let keys = if settings.editing.is_some() {
+                hints(&[("Enter", "save"), ("Esc", "cancel")])
+            } else {
+                let mut keys = vec![("↑↓", "move"), ("Enter", "change"), ("Esc", "close")];
+                if settings.row == SettingsRow::Plan {
+                    keys.insert(1, ("←→", "off/on"));
+                }
+                hints(&keys)
+            };
+            let lines = vec![
+                Line::default(),
+                row(SettingsRow::Model, "Model", vec![Span::raw(model)]),
+                row(SettingsRow::Plan, "Learning plan", plan),
+                // The row stays reserved while the plan is off, so nothing moves.
+                if app.plan_enabled {
+                    row(SettingsRow::PlanFile, "Plan file", file)
+                } else {
+                    Line::default()
+                },
+                Line::default(),
+                Line::styled(note, dim()),
+                Line::default(),
+                keys,
+            ];
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::bordered()
+                        .title(" Settings ")
+                        .padding(ratatui::widgets::Padding::horizontal(1)),
+                ),
+                area,
+            );
+            if let Some(column) = cursor {
+                f.set_cursor_position((area.x + 2 + 2 + LABEL as u16 + column as u16, area.y + 4));
+            }
+        }
         Modal::Confirm { message, .. } => {
             let mut lines: Vec<Line> = wrap(message, inner).into_iter().map(Line::from).collect();
             lines.push(Line::default());
@@ -887,6 +1230,209 @@ mod tests {
 
     fn rows(text: &str, width: usize) -> Vec<String> {
         message(text, width).iter().map(|l| l.to_string()).collect()
+    }
+
+    use crate::app::tests::{app_in, app_with_plan, press};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::crossterm::event::KeyCode;
+
+    /// The section 8.4 example, with neutral facts.
+    const EXAMPLE: &str = r#"{"format":"socratui-plan/1","generated_at":"2026-11-23T13:00:00Z",
+     "summary":"412 sources",
+     "skills":[
+      {"id":"kubernetes","name":"Kubernetes","weight":0.92,"start_level":1,"facts":["38 sources","rising"],"trend":"up","prerequisites":["docker"]},
+      {"id":"terraform","name":"Terraform","weight":0.8,"facts":["29 sources"],"trend":"flat"},
+      {"id":"docker","name":"Docker","weight":0.4,"start_level":1,"facts":["51 sources"]},
+      {"id":"ray","name":"Ray","weight":0.3,"facts":["9 sources"],"trend":"down"},
+      {"id":"mlflow","name":"MLflow","weight":0.3,"facts":["8 sources"]},
+      {"id":"bash","name":"Bash","weight":0.5,"start_level":4},
+      {"id":"git","name":"Git","weight":0.5,"start_level":5},
+      {"id":"linux","name":"Linux","weight":0.5,"start_level":4}],
+     "tracks":[{"id":"ml-platform-engineer","name":"ML platform engineer","facts":["70% overlap"],"skills":["ray","mlflow"]}]}"#;
+
+    fn screen(app: &mut App, width: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+        terminal.draw(|f| draw(f, app)).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| (0..buf.area.width).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    fn plan_view(app: &App) -> &app::PlanView {
+        match &app.screen {
+            Screen::Plan(view) => view,
+            _ => panic!("not on the plan screen"),
+        }
+    }
+
+    #[test]
+    fn plan_rows_fit_60_columns() {
+        let mut app = app_with_plan("ui-plan", Some(EXAMPLE));
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Char('G'));
+        press(&mut app, KeyCode::Enter);
+        for line in plan_lines(plan_view(&app), 60).0 {
+            assert!(line.width() <= 60, "{line}");
+        }
+        let rows = screen(&mut app, 60);
+        let text = rows.join("\n");
+        let k8s = rows
+            .iter()
+            .find(|r| r.contains("Kubernetes") && !r.contains("before"))
+            .expect(&text);
+        assert!(k8s.contains("you 1/4") && k8s.contains('▲'), "{text}");
+        assert!(text.contains("before Kubernetes"), "{text}");
+        assert!(
+            text.contains("Learning plan") && text.contains("412 sources"),
+            "{text}"
+        );
+        assert!(text.contains("needs Ray, MLflow"), "{text}");
+        assert!(text.contains("Done (3)") && text.contains("Git"), "{text}");
+
+        let mut app = app_with_plan("ui-empty", None);
+        press(&mut app, KeyCode::Char('p'));
+        let path = crate::plan::plan_path(
+            &std::env::temp_dir().join(format!("socratui-app-ui-empty-{}", std::process::id())),
+        );
+        let lines: Vec<String> = plan_lines(plan_view(&app), 200)
+            .0
+            .iter()
+            .map(|l| l.to_string())
+            .collect();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains(&path.display().to_string()))
+        );
+        assert!(
+            screen(&mut app, 60)
+                .join("")
+                .contains("docs/plan-format.md")
+        );
+    }
+
+    #[test]
+    fn plan_rows_fit_60_columns_with_three_digit_ranks() {
+        let skills: Vec<String> = (0..101)
+            .map(|i| {
+                format!(r#"{{"id":"s{i}","name":"Skill number {i}","weight":0.5,"facts":["12 sources","rising"],"trend":"up"}}"#)
+            })
+            .collect();
+        let plan = format!(
+            r#"{{"format":"socratui-plan/1","skills":[{}]}}"#,
+            skills.join(",")
+        );
+        let mut app = app_with_plan("ui-wide-rank", Some(&plan));
+        press(&mut app, KeyCode::Char('p'));
+        let lines = plan_lines(plan_view(&app), 60).0;
+        assert!(lines.iter().any(|l| l.to_string().contains("101")));
+        for line in lines {
+            assert!(line.width() <= 60, "{line}");
+        }
+    }
+
+    #[test]
+    fn level_is_floored_for_display() {
+        let plan =
+            r#"{"format":"socratui-plan/1","skills":[{"id":"a","name":"Alpha","weight":0.5}]}"#;
+        let mut app = app_with_plan("ui-floor", Some(plan));
+        let topic = app.db.create_topic("Alpha", 4, 0).unwrap();
+        app.db.link_plan_skill("a", topic).unwrap();
+        let names: Vec<String> = (0..5).map(|i| format!("s{i}")).collect();
+        app.db.add_subskills(topic, &names).unwrap();
+        for (i, sub) in app.db.subskills(topic).unwrap().iter().enumerate() {
+            app.db
+                .set_level(sub, if i < 3 { 4 } else { 3 }, "t", 0)
+                .unwrap();
+        }
+        press(&mut app, KeyCode::Char('p'));
+        let text = screen(&mut app, 80).join("\n");
+        assert!(text.contains("you 3/4"), "{text}");
+    }
+
+    #[test]
+    fn home_hints_show_p_only_while_plan_is_on() {
+        let mut app = app_in("ui-hints-off", None, false);
+        let text = screen(&mut app, 100).join("\n");
+        assert!(
+            text.contains("settings") && !text.contains("plan"),
+            "{text}"
+        );
+        let mut app = app_with_plan("ui-hints-on", None);
+        let text = screen(&mut app, 100).join("\n");
+        assert!(text.contains("p\u{a0}plan"), "{text}");
+    }
+
+    /// The rows of the modal box, found by its title, and its width.
+    fn modal_box(rows: &[String], title: &str) -> (usize, usize) {
+        let top = rows.iter().position(|r| r.contains(title)).expect(title);
+        let line: Vec<char> = rows[top].chars().collect();
+        let left = line.iter().position(|c| *c == '┌').unwrap();
+        let right = line.iter().rposition(|c| *c == '┐').unwrap();
+        let bottom = (top..rows.len())
+            .find(|&y| rows[y].chars().nth(left) == Some('└'))
+            .unwrap();
+        (bottom - top + 1, right - left + 1)
+    }
+
+    #[test]
+    fn settings_fit_60_columns_with_the_same_height() {
+        let mut app = app_in("ui-settings", None, false);
+        press(&mut app, KeyCode::Char('s'));
+        let off = screen(&mut app, 60);
+        let text = off.join("\n");
+        assert!(
+            text.contains("Model") && text.contains("Local model · test"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Learning plan") && text.contains(" Off ") && text.contains(" On "),
+            "{text}"
+        );
+        assert!(!text.contains("Plan file"), "{text}");
+        // The off/on hint shows only on the Learning plan row.
+        assert!(!text.contains("off/on"), "{text}");
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('l'));
+        let on = screen(&mut app, 60);
+        let text = on.join("\n");
+        assert!(text.contains("off/on"), "{text}");
+        assert!(
+            text.contains("Plan file") && text.contains("plan.json"),
+            "{text}"
+        );
+        assert_eq!(modal_box(&off, "Settings").0, modal_box(&on, "Settings").0);
+        let wide = screen(&mut app, 100);
+        assert!(modal_box(&wide, "Settings").1 <= 60, "{}", wide.join("\n"));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+        let text = screen(&mut app, 60).join("\n");
+        assert!(text.contains("default"), "{text}");
+    }
+
+    #[test]
+    fn age_of_the_plan() {
+        let now = DateTime::parse_from_rfc3339("2026-11-23T15:00:00Z").unwrap();
+        let age = |at: &str| age(at, now.into());
+        assert_eq!(
+            age("2026-11-23T14:59:30Z").as_deref(),
+            Some("updated just now")
+        );
+        assert_eq!(
+            age("2026-11-23T14:20:00Z").as_deref(),
+            Some("updated 40m ago")
+        );
+        assert_eq!(
+            age("2026-11-23T13:00:00Z").as_deref(),
+            Some("updated 2h ago")
+        );
+        assert_eq!(
+            age("2026-11-20T15:00:00Z").as_deref(),
+            Some("updated 3d ago")
+        );
+        assert_eq!(age("yesterday"), None);
     }
 
     #[test]

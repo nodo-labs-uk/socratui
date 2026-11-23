@@ -140,21 +140,39 @@ impl Provider {
         })
     }
 
-    /// Writes the settings, key included, to a file only the owner can read.
+    /// Writes the provider into the config file and keeps its other settings.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let text = serde_json::to_string_pretty(&json!({
-            "provider": self.kind.id(),
-            "base_url": self.base_url,
-            "key": self.key,
-            "model": self.model,
-        }))?;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        options.open(path)?.write_all(text.as_bytes())?;
-        Ok(())
+        let mut config = read_config(path)?;
+        config["provider"] = self.kind.id().into();
+        config["base_url"] = self.base_url.clone().into();
+        config["key"] = self.key.clone().into();
+        config["model"] = self.model.clone().into();
+        write_config(path, &config)
     }
+}
+
+/// The settings in the config file, or an empty object when there is none.
+/// A file that exists but cannot be read is an error, so that a save never
+/// replaces it and loses the settings in it.
+pub fn read_config(path: &Path) -> Result<Value> {
+    let text = match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(json!({})),
+        other => other.ok(),
+    };
+    text.and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .filter(Value::is_object)
+        .ok_or_else(|| anyhow::anyhow!("config.json could not be read, so it was not changed"))
+}
+
+/// Writes the settings, key included, to a file only the owner can read.
+pub fn write_config(path: &Path, config: &Value) -> Result<()> {
+    let text = serde_json::to_string_pretty(config)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(text.as_bytes())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -177,6 +195,20 @@ mod tests {
         }
         std::fs::remove_file(&path).unwrap();
         assert_eq!(Provider::load(&path), None);
+    }
+
+    #[test]
+    fn save_keeps_other_keys() {
+        let path = std::env::temp_dir().join(format!("socratui-keep-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"plan_path":"/p.json","plan_enabled":true}"#).unwrap();
+        let provider = Provider::new(Kind::Local, "");
+        provider.save(&path).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["plan_path"], "/p.json");
+        assert_eq!(v["plan_enabled"], true);
+        assert_eq!(v["provider"], "local");
+        assert_eq!(Provider::load(&path), Some(provider));
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
