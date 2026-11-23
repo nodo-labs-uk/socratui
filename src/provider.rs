@@ -142,12 +142,17 @@ impl Provider {
 
     /// Writes the settings, key included, to a file only the owner can read.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let text = serde_json::to_string_pretty(&json!({
-            "provider": self.kind.id(),
-            "base_url": self.base_url,
-            "key": self.key,
-            "model": self.model,
-        }))?;
+        // Keep other settings in the file, such as `plan_path`.
+        let mut config = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            .filter(Value::is_object)
+            .unwrap_or_else(|| json!({}));
+        config["provider"] = self.kind.id().into();
+        config["base_url"] = self.base_url.clone().into();
+        config["key"] = self.key.clone().into();
+        config["model"] = self.model.clone().into();
+        let text = serde_json::to_string_pretty(&config)?;
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create(true).truncate(true);
         #[cfg(unix)]
@@ -177,6 +182,19 @@ mod tests {
         }
         std::fs::remove_file(&path).unwrap();
         assert_eq!(Provider::load(&path), None);
+    }
+
+    #[test]
+    fn save_keeps_other_keys() {
+        let path = std::env::temp_dir().join(format!("socratui-keep-{}.json", std::process::id()));
+        std::fs::write(&path, r#"{"plan_path":"/p.json"}"#).unwrap();
+        let provider = Provider::new(Kind::Local, "");
+        provider.save(&path).unwrap();
+        let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["plan_path"], "/p.json");
+        assert_eq!(v["provider"], "local");
+        assert_eq!(Provider::load(&path), Some(provider));
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

@@ -4,6 +4,8 @@ mod db;
 mod diagram;
 mod export;
 mod input;
+#[allow(dead_code)] // until the plan screen uses it
+mod plan;
 mod provider;
 mod srs;
 mod tutor;
