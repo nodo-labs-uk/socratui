@@ -83,7 +83,9 @@ The home screen shows each topic's progress, its recent level changes with the r
 
 ## Learning plan
 
-A learning plan is a JSON file that lists skills to learn, each with a weight. Any tool can write one: the format is in [docs/plan-format.md](docs/plan-format.md). Socratui reads `plan.json` in its data folder, or the file that `plan_path` in `config.json` names.
+A learning plan is a JSON file that lists skills to learn, each with a weight. Any tool can write one: the format is in [docs/plan-format.md](docs/plan-format.md).
+
+**The plan is off by default.** To turn it on, press `s` for settings, move to *Learning plan* and choose *On*. Socratui then reads `plan.json` in its data folder. To use another file, set *Plan file* in settings; an empty value goes back to `plan.json`. While the plan is off, Socratui never reads the file and `p` does nothing.
 
 **`p` opens the plan.** Skills are ranked by weight and by how far you are from the aim, so the next skill to learn comes first. A skill that another one builds on, and that you know little of, moves up and says `before` the skill it unlocks. `Enter` starts a topic for the skill, with a hint about where you are likely to start, or continues the topic you already have. Your levels in that topic then move the skill down the list, and a skill that reaches the aim goes to *Done*.
 
@@ -97,7 +99,7 @@ The plan can also suggest tracks to branch out into. `b` follows a track, and it
 2. Paste the key, or give the server's address.
 3. Confirm the model.
 
-`s` opens the same dialog later. The key is saved in a file only you can read.
+Later, press `s` for settings and `Enter` on *Model* to open the same dialog. The key is saved in a file only you can read.
 
 ![First start with no key set: choosing a local model, then switching to Anthropic with a key](docs/media/setup.svg)
 
@@ -142,12 +144,12 @@ The arrows and `PgUp` `PgDn` work everywhere too.
 | Key | What it does |
 |---|---|
 | `n` | new topic |
-| `p` | the learning plan |
+| `p` | the learning plan, once it is on in settings |
 | `r` | review the topic's due concepts |
 | `f` | review the flashcards that are due |
 | `H` | session history |
 | `e` | export every flashcard for Anki |
-| `s` | provider and key |
+| `s` | settings: the model, and the learning plan on or off |
 | `dd` | delete the topic, with its sessions and cards, after a confirmation |
 | `q` | quit |
 
@@ -222,7 +224,7 @@ or build it from source with `cargo install --path .`. Then run `socratui`.
 Everything is in `~/.local/share/socratui/`, or in `$SOCRATUI_DATA_DIR` if set:
 
 - `socratui.db`: topics, subskills and levels, every level change, sessions and their messages, and flashcards with their review history.
-- `config.json`: the provider, its address, the key and the model, readable only by you.
+- `config.json`: the provider, its address, the key and the model, and the learning plan settings (`plan_enabled`, `plan_path`). Only you can read it.
 - `anki-export.txt`: written by `e`.
 - `plan.json`: the learning plan, if you have one.
 

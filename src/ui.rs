@@ -1,7 +1,9 @@
 //! Drawing. Reads the app state; the only thing it writes back is the clamped
 //! transcript scroll position.
 
-use crate::app::{self, App, CardReview, Chat, Item, Modal, Screen, SetupStep, TopicRow};
+use crate::app::{
+    self, App, CardReview, Chat, Item, Modal, Screen, SettingsRow, SetupStep, TopicRow,
+};
 use crate::db::Subskill;
 use crate::provider::Kind;
 use crate::srs::{self, Grade};
@@ -47,6 +49,22 @@ fn fit(text: &str, width: usize) -> String {
     }
     out.push('…');
     format!("{out}{}", " ".repeat(width.saturating_sub(out.width())))
+}
+
+/// Like `fit`, but cuts from the start, so the end of a path stays visible.
+fn fit_start(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return fit(text, width);
+    }
+    let mut out: Vec<char> = Vec::new();
+    for c in text.chars().rev() {
+        if out.iter().collect::<String>().width() + 2 > width {
+            break;
+        }
+        out.push(c);
+    }
+    let kept: String = out.into_iter().rev().collect();
+    fit(&format!("…{kept}"), width)
 }
 
 fn bar(filled: usize, width: usize) -> String {
@@ -97,19 +115,24 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 
 fn key_hints(app: &App) -> Line<'static> {
     match &app.screen {
-        Screen::Home => hints(&[
-            ("Enter", "learn"),
-            ("n", "new topic"),
-            ("p", "plan"),
-            ("r", "review concepts"),
-            ("f", "flashcards"),
-            ("H", "history"),
-            ("m", "model"),
-            ("e", "export to Anki"),
-            ("s", "settings"),
-            ("dd", "delete"),
-            ("q", "quit"),
-        ]),
+        Screen::Home => {
+            let mut keys = vec![
+                ("Enter", "learn"),
+                ("n", "new topic"),
+                ("r", "review concepts"),
+                ("f", "flashcards"),
+                ("H", "history"),
+                ("m", "model"),
+                ("e", "export to Anki"),
+                ("s", "settings"),
+                ("dd", "delete"),
+                ("q", "quit"),
+            ];
+            if app.plan_enabled {
+                keys.insert(2, ("p", "plan"));
+            }
+            hints(&keys)
+        }
         Screen::Chat(chat) if chat.read_only => hints(&[
             ("j k", "scroll"),
             ("Ctrl+D Ctrl+U", "half page"),
@@ -219,7 +242,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     f.render_widget(Paragraph::new(keys).wrap(Wrap { trim: true }), footer);
 
     if let Some(modal) = &app.modal {
-        draw_modal(f, modal);
+        draw_modal(f, app, modal);
     }
 }
 
@@ -881,16 +904,19 @@ fn plan_screen(f: &mut Frame, area: Rect, view: &app::PlanView) {
 
 const PICKER_ROWS: usize = 8;
 
-fn draw_modal(f: &mut Frame, modal: &Modal) {
+fn draw_modal(f: &mut Frame, app: &App, modal: &Modal) {
     let screen = f.area();
-    // The picker keeps one size, whatever the filter leaves in its list.
+    // The picker keeps one size, whatever the filter leaves in its list, and
+    // settings keep one size whether the plan file row shows or not.
     let height = match modal {
         Modal::Model(_) => PICKER_ROWS as u16 + 7,
+        Modal::Settings(_) => 10,
         _ => 8,
     };
     // The provider buttons need 76 columns once there are five of them.
     let width = match modal {
         Modal::Setup(_) => 76,
+        Modal::Settings(_) => 60,
         _ => 64,
     };
     let (width, height) = (screen.width.min(width), height.min(screen.height));
@@ -1100,6 +1126,88 @@ fn draw_modal(f: &mut Frame, modal: &Modal) {
             f.render_widget(Paragraph::new(lines).block(block), area);
             f.set_cursor_position((area.x + 2 + column as u16, area.y + 2));
         }
+        Modal::Settings(settings) => {
+            const LABEL: usize = 15;
+            let value_width = inner.saturating_sub(2 + LABEL);
+            let row = |which: SettingsRow, label: &str, value: Vec<Span<'static>>| {
+                let chosen = settings.row == which;
+                let mut spans = vec![Span::raw(if chosen { "▸ " } else { "  " })];
+                spans.push(Span::styled(
+                    fit(label, LABEL),
+                    if chosen { bold() } else { dim() },
+                ));
+                spans.extend(value);
+                let line = Line::from(clip(spans, inner));
+                if chosen { line.style(selected()) } else { line }
+            };
+            let model = app.provider.as_ref().map_or("not set".to_string(), |p| {
+                format!("{} · {}", p.kind.label(), p.model)
+            });
+            let button = |label: &str, on: bool| {
+                let style = if on {
+                    bold().fg(Color::Black).bg(ACCENT)
+                } else {
+                    dim()
+                };
+                Span::styled(format!(" {label} "), style)
+            };
+            let plan = vec![
+                button("Off", !app.plan_enabled),
+                Span::raw(" "),
+                button("On", app.plan_enabled),
+            ];
+            let mut cursor = None;
+            let file = match &settings.editing {
+                Some(input) => {
+                    let (rows, at) = input.layout(value_width);
+                    cursor = Some(at.0);
+                    vec![Span::raw(rows[at.1].clone())]
+                }
+                None => vec![Span::raw(fit_start(&settings.plan_file, value_width))],
+            };
+            let note = match (settings.row, &settings.editing) {
+                (_, Some(_)) => "Leave empty to use the default file.",
+                (SettingsRow::Model, _) => "Enter changes the provider, key or model.",
+                (SettingsRow::Plan, _) => "Ranks the skills in a plan file. p on Home opens it.",
+                (SettingsRow::PlanFile, _) => "The format is in docs/plan-format.md.",
+            };
+            let keys = if settings.editing.is_some() {
+                hints(&[("Enter", "save"), ("Esc", "cancel")])
+            } else {
+                hints(&[
+                    ("↑↓", "move"),
+                    ("←→", "off/on"),
+                    ("Enter", "change"),
+                    ("Esc", "close"),
+                ])
+            };
+            let lines = vec![
+                Line::default(),
+                row(SettingsRow::Model, "Model", vec![Span::raw(model)]),
+                row(SettingsRow::Plan, "Learning plan", plan),
+                // The row stays reserved while the plan is off, so nothing moves.
+                if app.plan_enabled {
+                    row(SettingsRow::PlanFile, "Plan file", file)
+                } else {
+                    Line::default()
+                },
+                Line::default(),
+                Line::styled(note, dim()),
+                Line::default(),
+                keys,
+            ];
+            f.render_widget(
+                Paragraph::new(lines).block(
+                    Block::bordered()
+                        .title(" Settings ")
+                        .padding(ratatui::widgets::Padding::horizontal(1)),
+                ),
+                area,
+            );
+            if let Some(column) = cursor {
+                f.set_cursor_position((area.x + 2 + 2 + LABEL as u16 + column as u16, area.y + 4));
+            }
+        }
         Modal::Confirm { message, .. } => {
             let mut lines: Vec<Line> = wrap(message, inner).into_iter().map(Line::from).collect();
             lines.push(Line::default());
@@ -1124,7 +1232,7 @@ mod tests {
         message(text, width).iter().map(|l| l.to_string()).collect()
     }
 
-    use crate::app::tests::{app_with_plan, press};
+    use crate::app::tests::{app_in, app_with_plan, press};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::KeyCode;
@@ -1242,6 +1350,63 @@ mod tests {
         press(&mut app, KeyCode::Char('p'));
         let text = screen(&mut app, 80).join("\n");
         assert!(text.contains("you 3/4"), "{text}");
+    }
+
+    #[test]
+    fn home_hints_show_p_only_while_plan_is_on() {
+        let mut app = app_in("ui-hints-off", None, false);
+        let text = screen(&mut app, 100).join("\n");
+        assert!(
+            text.contains("settings") && !text.contains("plan"),
+            "{text}"
+        );
+        let mut app = app_with_plan("ui-hints-on", None);
+        let text = screen(&mut app, 100).join("\n");
+        assert!(text.contains("p\u{a0}plan"), "{text}");
+    }
+
+    /// The rows of the modal box, found by its title, and its width.
+    fn modal_box(rows: &[String], title: &str) -> (usize, usize) {
+        let top = rows.iter().position(|r| r.contains(title)).expect(title);
+        let line: Vec<char> = rows[top].chars().collect();
+        let left = line.iter().position(|c| *c == '┌').unwrap();
+        let right = line.iter().rposition(|c| *c == '┐').unwrap();
+        let bottom = (top..rows.len())
+            .find(|&y| rows[y].chars().nth(left) == Some('└'))
+            .unwrap();
+        (bottom - top + 1, right - left + 1)
+    }
+
+    #[test]
+    fn settings_fit_60_columns_with_the_same_height() {
+        let mut app = app_in("ui-settings", None, false);
+        press(&mut app, KeyCode::Char('s'));
+        let off = screen(&mut app, 60);
+        let text = off.join("\n");
+        assert!(
+            text.contains("Model") && text.contains("Local model · test"),
+            "{text}"
+        );
+        assert!(
+            text.contains("Learning plan") && text.contains(" Off ") && text.contains(" On "),
+            "{text}"
+        );
+        assert!(!text.contains("Plan file"), "{text}");
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('l'));
+        let on = screen(&mut app, 60);
+        let text = on.join("\n");
+        assert!(
+            text.contains("Plan file") && text.contains("plan.json"),
+            "{text}"
+        );
+        assert_eq!(modal_box(&off, "Settings").0, modal_box(&on, "Settings").0);
+        let wide = screen(&mut app, 100);
+        assert!(modal_box(&wide, "Settings").1 <= 60, "{}", wide.join("\n"));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Enter);
+        let text = screen(&mut app, 60).join("\n");
+        assert!(text.contains("default"), "{text}");
     }
 
     #[test]

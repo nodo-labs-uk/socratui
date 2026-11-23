@@ -169,6 +169,23 @@ pub enum Modal {
     },
     Setup(Setup),
     Model(ModelPicker),
+    Settings(Settings),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SettingsRow {
+    Model,
+    Plan,
+    PlanFile,
+}
+
+/// The settings page: the model, and the learning plan switch and file.
+pub struct Settings {
+    pub row: SettingsRow,
+    /// The plan file field while it is being edited.
+    pub editing: Option<Input>,
+    /// The plan file in use, with the home folder as `~`.
+    pub plan_file: String,
 }
 
 /// Picks the model from the provider's list, filtered by what is typed.
@@ -240,6 +257,8 @@ pub struct Setup {
     pub input: Input,
     /// True when Enter on an empty key field keeps the saved key.
     pub has_saved_key: bool,
+    /// Opened from settings, so closing it goes back there.
+    from_settings: bool,
     url: String,
     key: String,
 }
@@ -279,6 +298,8 @@ pub struct App {
     pub history_selected: usize,
     pub status: String,
     pub quit: bool,
+    /// The learning plan is on in settings. Off, the plan file is never read.
+    pub plan_enabled: bool,
     /// The first key of a two-key command such as `gg` or `dd`.
     pending: Option<char>,
     data_dir: PathBuf,
@@ -349,6 +370,7 @@ impl App {
             history_selected: 0,
             status: String::new(),
             quit: false,
+            plan_enabled: plan::plan_enabled(&data_dir),
             pending: None,
             data_dir,
             models_tx,
@@ -359,7 +381,7 @@ impl App {
         };
         app.refresh_home()?;
         if app.provider.is_none() {
-            app.open_setup();
+            app.open_setup(false);
         }
         Ok(app)
     }
@@ -423,6 +445,13 @@ impl App {
                         picker.input.insert_str(text.trim());
                         picker.selected = 0;
                     }
+                    (
+                        Some(Modal::Settings(Settings {
+                            editing: Some(input),
+                            ..
+                        })),
+                        _,
+                    ) => input.insert_str(text.trim()),
                     (None, Screen::Chat(chat)) if !chat.read_only => {
                         chat.insert = true;
                         chat.input.insert_str(&text)
@@ -435,12 +464,13 @@ impl App {
         }
     }
 
-    fn open_setup(&mut self) {
+    fn open_setup(&mut self, from_settings: bool) {
         self.modal = Some(Modal::Setup(Setup {
             kind: self.provider.as_ref().map_or(Kind::Anthropic, |p| p.kind),
             step: SetupStep::Provider,
             input: Input::default(),
             has_saved_key: false,
+            from_settings,
             url: String::new(),
             key: String::new(),
         }));
@@ -476,7 +506,10 @@ impl App {
         let text = setup.input.text().trim().to_string();
 
         match (setup.step, key.code) {
-            (SetupStep::Provider, KeyCode::Esc) => self.modal = None,
+            (SetupStep::Provider, KeyCode::Esc) => {
+                let back = setup.from_settings;
+                self.close_setup(back);
+            }
             (SetupStep::Provider, KeyCode::Left | KeyCode::Char('h')) => {
                 let i = Kind::ALL.iter().position(|k| *k == setup.kind).unwrap_or(0);
                 setup.kind = Kind::ALL[i.saturating_sub(1)];
@@ -523,16 +556,89 @@ impl App {
                     provider.model
                 );
                 self.provider = Some(provider);
-                self.modal = None;
+                let back = setup.from_settings;
+                self.close_setup(back);
             }
             _ => edit_key(&mut setup.input, key),
         }
         Ok(())
     }
 
+    fn close_setup(&mut self, from_settings: bool) {
+        self.modal = None;
+        if from_settings {
+            self.open_settings();
+        }
+    }
+
+    // ---- settings ----
+
+    fn open_settings(&mut self) {
+        self.modal = Some(Modal::Settings(Settings {
+            row: SettingsRow::Model,
+            editing: None,
+            plan_file: short_path(&plan::plan_path(&self.data_dir)),
+        }));
+    }
+
+    fn set_plan_enabled(&mut self, enabled: bool) -> Result<()> {
+        plan::save_plan_enabled(&self.data_dir, enabled)?;
+        self.plan_enabled = enabled;
+        self.status = if enabled {
+            "The learning plan is on. Press p on the home screen.".into()
+        } else {
+            "The learning plan is off.".into()
+        };
+        Ok(())
+    }
+
+    fn settings_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Some(Modal::Settings(settings)) = &mut self.modal else {
+            return Ok(());
+        };
+        if let Some(input) = &mut settings.editing {
+            match key.code {
+                KeyCode::Esc => settings.editing = None,
+                KeyCode::Enter => {
+                    plan::save_plan_path(&self.data_dir, &input.text())?;
+                    settings.editing = None;
+                    settings.plan_file = short_path(&plan::plan_path(&self.data_dir));
+                }
+                _ => edit_key(input, key),
+            }
+            return Ok(());
+        }
+        use SettingsRow::*;
+        // The plan file row exists only while the plan is on.
+        let rows: &[SettingsRow] = if self.plan_enabled {
+            &[Model, Plan, PlanFile]
+        } else {
+            &[Model, Plan]
+        };
+        let i = rows.iter().position(|r| *r == settings.row).unwrap_or(0);
+        match (settings.row, key.code) {
+            (_, KeyCode::Esc) => self.modal = None,
+            (_, KeyCode::Down | KeyCode::Char('j')) => {
+                settings.row = rows[(i + 1).min(rows.len() - 1)]
+            }
+            (_, KeyCode::Up | KeyCode::Char('k')) => settings.row = rows[i.saturating_sub(1)],
+            (Plan, KeyCode::Left | KeyCode::Char('h')) => self.set_plan_enabled(false)?,
+            (Plan, KeyCode::Right | KeyCode::Char('l')) => self.set_plan_enabled(true)?,
+            (Plan, KeyCode::Enter) => self.set_plan_enabled(!self.plan_enabled)?,
+            (Model, KeyCode::Enter) => self.open_setup(true),
+            (PlanFile, KeyCode::Enter) => {
+                let mut input = Input::default();
+                input.insert_str(&plan::configured_plan_path(&self.data_dir).unwrap_or_default());
+                settings.editing = Some(input);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn open_model_picker(&mut self) {
         let Some(provider) = self.provider.clone() else {
-            self.open_setup();
+            self.open_setup(false);
             return;
         };
         let mut models: Vec<String> = provider
@@ -609,6 +715,7 @@ impl App {
         match modal {
             Modal::Setup(_) => return self.setup_key(key),
             Modal::Model(_) => return self.model_key(key),
+            Modal::Settings(_) => return self.settings_key(key),
             Modal::NewTopic { input, target } => match key.code {
                 KeyCode::Esc => self.modal = None,
                 KeyCode::Tab => *target = if *target == 4 { 5 } else { 4 },
@@ -665,7 +772,7 @@ impl App {
                     target: 4,
                 })
             }
-            KeyCode::Char('p') => self.open_plan()?,
+            KeyCode::Char('p') if self.plan_enabled => self.open_plan()?,
             KeyCode::Enter | KeyCode::Char('l') => {
                 if let Some((id, _)) = topic {
                     self.start_chat(id, Mode::Learn, None)?;
@@ -698,7 +805,7 @@ impl App {
                 self.screen = Screen::History;
             }
             KeyCode::Char('e') => self.export()?,
-            KeyCode::Char('s') => self.open_setup(),
+            KeyCode::Char('s') => self.open_settings(),
             KeyCode::Char('m') => self.open_model_picker(),
             KeyCode::Char('d') if pending == Some('d') => {
                 if let Some((id, title)) = topic {
@@ -1346,8 +1453,9 @@ pub(crate) mod tests {
     use super::*;
 
     /// An app on an in-memory database, with `plan` (if any) as its plan file.
-    /// The provider points at a closed port, so requests fail at once and offline.
-    pub(crate) fn app_with_plan(name: &str, plan: Option<&str>) -> App {
+    /// The provider points at a closed port, so requests fail at once and offline,
+    /// and is saved in config.json with the plan turned on or off.
+    pub(crate) fn app_in(name: &str, plan: Option<&str>, plan_enabled: bool) -> App {
         let dir = std::env::temp_dir().join(format!("socratui-app-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1360,11 +1468,158 @@ pub(crate) mod tests {
             key: String::new(),
             model: "test".into(),
         };
+        provider.save(&dir.join(CONFIG_FILE)).unwrap();
+        if plan_enabled {
+            plan::save_plan_enabled(&dir, true).unwrap();
+        }
         App::new(Db::in_memory().unwrap(), Some(provider), dir).unwrap()
+    }
+
+    /// An app with the learning plan turned on.
+    pub(crate) fn app_with_plan(name: &str, plan: Option<&str>) -> App {
+        app_in(name, plan, true)
     }
 
     pub(crate) fn press(app: &mut App, code: KeyCode) {
         app.on_event(Event::Key(KeyEvent::from(code))).unwrap();
+    }
+
+    fn config(app: &App) -> Value {
+        crate::provider::read_config(&app.data_dir.join(CONFIG_FILE))
+    }
+
+    fn settings(app: &App) -> &Settings {
+        match &app.modal {
+            Some(Modal::Settings(settings)) => settings,
+            _ => panic!("settings are not open"),
+        }
+    }
+
+    #[test]
+    fn plan_is_off_by_default() {
+        let mut app = app_in("plan-off", Some("{"), false);
+        assert!(!app.plan_enabled);
+        press(&mut app, KeyCode::Char('p'));
+        assert!(matches!(app.screen, Screen::Home));
+        app.poll_stream().unwrap();
+        assert!(matches!(app.screen, Screen::Home));
+        assert!(app.status.is_empty(), "{}", app.status);
+    }
+
+    #[test]
+    fn settings_toggle_turns_plan_on_and_saves() {
+        let mut app = app_in("toggle-on", Some(ONE_SKILL), false);
+        press(&mut app, KeyCode::Char('s'));
+        assert_eq!(settings(&app).row, SettingsRow::Model);
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(settings(&app).row, SettingsRow::Plan);
+        press(&mut app, KeyCode::Char('l'));
+        let v = config(&app);
+        assert_eq!(v["plan_enabled"], true);
+        assert_eq!(v["provider"], "local");
+        assert_eq!(v["base_url"], "http://127.0.0.1:9");
+        assert_eq!(v["model"], "test");
+        assert!(app.plan_enabled);
+        press(&mut app, KeyCode::Esc);
+        assert!(app.modal.is_none());
+        press(&mut app, KeyCode::Char('p'));
+        assert!(matches!(plan_view(&app).state, PlanState::Loaded(_)));
+    }
+
+    #[test]
+    fn settings_toggle_off_hides_plan_again() {
+        let mut app = app_with_plan("toggle-off", Some(ONE_SKILL));
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Left);
+        assert_eq!(config(&app)["plan_enabled"], false);
+        assert!(!app.plan_enabled);
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Char('p'));
+        assert!(matches!(app.screen, Screen::Home));
+    }
+
+    #[test]
+    fn plan_file_row_shows_only_while_plan_is_on() {
+        let mut app = app_in("file-row", None, false);
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(settings(&app).row, SettingsRow::Plan);
+        press(&mut app, KeyCode::Char('l'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(settings(&app).row, SettingsRow::PlanFile);
+        // Turning the plan off from here would leave the cursor on a hidden row.
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('h'));
+        press(&mut app, KeyCode::Char('j'));
+        assert_eq!(settings(&app).row, SettingsRow::Plan);
+    }
+
+    #[test]
+    fn plan_file_edit_saves_path() {
+        let mut app = app_with_plan("plan-file", None);
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Char('j'));
+        press(&mut app, KeyCode::Char('j'));
+        assert!(settings(&app).plan_file.ends_with("plan.json"));
+        press(&mut app, KeyCode::Enter);
+        assert!(settings(&app).editing.is_some());
+        // j and k are typed while editing, not moves.
+        for c in "/tmp/jk.json".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Enter);
+        assert!(settings(&app).editing.is_none());
+        assert_eq!(config(&app)["plan_path"], "/tmp/jk.json");
+        assert_eq!(config(&app)["provider"], "local");
+        assert_eq!(settings(&app).plan_file, "/tmp/jk.json");
+
+        // The field starts with the saved value; Ctrl+U clears it.
+        press(&mut app, KeyCode::Enter);
+        let clear = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        app.on_event(Event::Key(clear)).unwrap();
+        press(&mut app, KeyCode::Enter);
+        assert!(config(&app).get("plan_path").is_none());
+        assert!(settings(&app).plan_file.ends_with("plan.json"));
+
+        // Esc while editing cancels the edit and keeps settings open.
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('x'));
+        press(&mut app, KeyCode::Esc);
+        assert!(settings(&app).editing.is_none());
+        assert!(config(&app).get("plan_path").is_none());
+    }
+
+    #[test]
+    fn model_row_opens_provider_wizard() {
+        let mut app = app_in("model-row", None, false);
+        press(&mut app, KeyCode::Char('s'));
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.modal, Some(Modal::Setup(_))));
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(settings(&app).row, SettingsRow::Model);
+
+        // Finishing the wizard also returns to settings.
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Char('5'));
+        press(&mut app, KeyCode::Enter);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(settings(&app).row, SettingsRow::Model);
+        assert_eq!(config(&app)["provider"], "local");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.modal.is_none());
+    }
+
+    #[test]
+    fn no_provider_still_opens_wizard_directly() {
+        let dir = std::env::temp_dir().join(format!("socratui-app-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = App::new(Db::in_memory().unwrap(), None, dir).unwrap();
+        assert!(matches!(app.modal, Some(Modal::Setup(_))));
+        press(&mut app, KeyCode::Esc);
+        assert!(app.modal.is_none());
     }
 
     const ONE_SKILL: &str = r#"{"format":"socratui-plan/1","skills":[

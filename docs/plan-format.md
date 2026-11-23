@@ -2,12 +2,18 @@
 
 socratui can read a learning plan: a JSON file that lists skills to learn, each with a weight. Any tool can write one. socratui ranks the skills and shows them on the plan screen.
 
+## Turning the plan on
+
+The plan is off by default. While it is off, socratui never reads the plan file. To turn it on, press `s` for settings, move to *Learning plan* and choose *On*. Then `p` on the home screen opens the plan.
+
 ## Where the file lives
 
-socratui reads `plan.json` in its data directory. To use another file, set `plan_path` in `config.json` (in the same directory). A leading `~` stands for your home directory.
+socratui reads `plan.json` in its data directory. To use another file, set *Plan file* in settings. An empty value goes back to `plan.json`. A leading `~` stands for your home directory.
+
+Settings saves both values in `config.json`, in the same directory:
 
 ```json
-{ "plan_path": "~/plans/socratui.json" }
+{ "plan_enabled": true, "plan_path": "~/plans/socratui.json" }
 ```
 
 ## Example

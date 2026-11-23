@@ -140,26 +140,35 @@ impl Provider {
         })
     }
 
-    /// Writes the settings, key included, to a file only the owner can read.
+    /// Writes the provider into the config file and keeps its other settings.
     pub fn save(&self, path: &Path) -> Result<()> {
-        // Keep other settings in the file, such as `plan_path`.
-        let mut config = std::fs::read_to_string(path)
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-            .filter(Value::is_object)
-            .unwrap_or_else(|| json!({}));
+        let mut config = read_config(path);
         config["provider"] = self.kind.id().into();
         config["base_url"] = self.base_url.clone().into();
         config["key"] = self.key.clone().into();
         config["model"] = self.model.clone().into();
-        let text = serde_json::to_string_pretty(&config)?;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        options.open(path)?.write_all(text.as_bytes())?;
-        Ok(())
+        write_config(path, &config)
     }
+}
+
+/// The settings in the config file, or an empty object.
+pub fn read_config(path: &Path) -> Value {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}))
+}
+
+/// Writes the settings, key included, to a file only the owner can read.
+pub fn write_config(path: &Path, config: &Value) -> Result<()> {
+    let text = serde_json::to_string_pretty(config)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(text.as_bytes())?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -187,11 +196,12 @@ mod tests {
     #[test]
     fn save_keeps_other_keys() {
         let path = std::env::temp_dir().join(format!("socratui-keep-{}.json", std::process::id()));
-        std::fs::write(&path, r#"{"plan_path":"/p.json"}"#).unwrap();
+        std::fs::write(&path, r#"{"plan_path":"/p.json","plan_enabled":true}"#).unwrap();
         let provider = Provider::new(Kind::Local, "");
         provider.save(&path).unwrap();
         let v: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["plan_path"], "/p.json");
+        assert_eq!(v["plan_enabled"], true);
         assert_eq!(v["provider"], "local");
         assert_eq!(Provider::load(&path), Some(provider));
         std::fs::remove_file(&path).unwrap();

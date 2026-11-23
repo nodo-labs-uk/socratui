@@ -1,6 +1,7 @@
 //! A learning plan: weighted skills, read from a JSON file in the
 //! `socratui-plan/1` format (see docs/plan-format.md).
 
+use crate::provider::{read_config, write_config};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -160,20 +161,55 @@ pub fn parse(input: &str) -> Result<Plan, String> {
     })
 }
 
+fn config_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(crate::app::CONFIG_FILE)
+}
+
+/// Whether the learner turned the plan on in settings. Off when missing.
+pub fn plan_enabled(data_dir: &Path) -> bool {
+    read_config(&config_path(data_dir))["plan_enabled"]
+        .as_bool()
+        .unwrap_or(false)
+}
+
+/// `plan_path` as written in config.json, if it is set.
+pub fn configured_plan_path(data_dir: &Path) -> Option<String> {
+    read_config(&config_path(data_dir))["plan_path"]
+        .as_str()
+        .map(str::to_string)
+}
+
 /// The plan file: `plan_path` from config.json (a leading `~` is the home
 /// directory), else `plan.json` in the data directory.
 pub fn plan_path(data_dir: &Path) -> PathBuf {
-    let configured = std::fs::read_to_string(data_dir.join(crate::app::CONFIG_FILE))
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|v| v["plan_path"].as_str().map(str::to_string));
-    match configured {
+    match configured_plan_path(data_dir) {
         Some(p) => match p.strip_prefix("~/") {
             Some(rest) => dirs::home_dir().map_or_else(|| PathBuf::from(&p), |h| h.join(rest)),
             None => PathBuf::from(p),
         },
         None => data_dir.join(PLAN_FILE),
     }
+}
+
+/// Turns the plan on or off and keeps the other settings.
+pub fn save_plan_enabled(data_dir: &Path, enabled: bool) -> anyhow::Result<()> {
+    let path = config_path(data_dir);
+    let mut config = read_config(&path);
+    config["plan_enabled"] = enabled.into();
+    write_config(&path, &config)
+}
+
+/// Sets `plan_path`, or removes it when `value` is empty so the default applies.
+pub fn save_plan_path(data_dir: &Path, value: &str) -> anyhow::Result<()> {
+    let path = config_path(data_dir);
+    let mut config = read_config(&path);
+    if let Some(map) = config.as_object_mut() {
+        match value.trim() {
+            "" => map.remove("plan_path"),
+            v => map.insert("plan_path".into(), v.into()),
+        };
+    }
+    write_config(&path, &config)
 }
 
 pub const DEFAULT_TARGET: i64 = 4;
