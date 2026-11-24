@@ -167,7 +167,8 @@ The arrows and `PgUp` `PgDn` work everywhere too.
 |---|---|
 | `Enter` | send your answer |
 | `Alt+Enter`, `Ctrl+J` | new line |
-| `Ctrl+W` `Ctrl+U` | delete the word, or the line, before the cursor (in every text box) |
+| `Ctrl+W` | delete the word before the cursor |
+| `Ctrl+D` `Ctrl+U` | scroll half a page down, up |
 | `Ctrl+F` | make flashcards for what you have covered |
 | `Ctrl+O` | open the latest graph as a picture |
 | `Ctrl+R` | retry after an error |
